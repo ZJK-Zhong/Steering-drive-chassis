@@ -49,8 +49,8 @@ static void chassis_set_contorl(chassis_move_t *chassis_move_control);
 static void chassis_motor_moving_solution(const fp32 vx_set, const fp32 vy_set, const fp32 wz_set,chassis_move_t *chassis_move_solution);
 static void chassis_control_loop(chassis_move_t *chassis_move_control_loop);
 static void chassis_CAN_Send(void);
+static fp32 normalize_rad(fp32 rad);
 	
-
 
 
 
@@ -84,9 +84,13 @@ void chassis_task(void const *pvParameters)
     {
 		chassis_feedback_update(&chassis_move);
         chassis_set_contorl(&chassis_move);
-		chassis_motor_moving_solution(chassis_move.vx_set,chassis_move.vy_set,chassis_move.wz_set,&chassis_move);
+        if (chassis_move.mode != CHASSIS_MODE_ZERO_FORCE)
+        {
+            chassis_motor_moving_solution(chassis_move.vx_set,chassis_move.vy_set,chassis_move.wz_set,&chassis_move);
+        }
         chassis_control_loop(&chassis_move);
 		chassis_CAN_Send();
+
         //系统延时
         vTaskDelay(CHASSIS_CONTROL_TIME_MS);
 
@@ -115,6 +119,7 @@ static void chassis_init(chassis_move_t *chassis_move_init)
     const static fp32 driver_motor_speed_pid[3] = {M3505_MOTOR_SPEED_PID_KP, M3505_MOTOR_SPEED_PID_KI, M3505_MOTOR_SPEED_PID_KD};
     const static fp32 steering_motor_angle_pid[3]={STEERING_ENCODE_RELATIVE_PID_KP, STEERING_ENCODE_RELATIVE_PID_KI, STEERING_ENCODE_RELATIVE_PID_KD};
     const static fp32 chassis_yaw_pid[3] = {CHASSIS_FOLLOW_GIMBAL_PID_KP, CHASSIS_FOLLOW_GIMBAL_PID_KI, CHASSIS_FOLLOW_GIMBAL_PID_KD};
+    const static fp32 spin_rate_pid[3] = {CHASSIS_SPIN_RATE_PID_KP, CHASSIS_SPIN_RATE_PID_KI, CHASSIS_SPIN_RATE_PID_KD};
 
 
 
@@ -140,6 +145,8 @@ static void chassis_init(chassis_move_t *chassis_move_init)
     }
         //初始化底盘角度计算PID
     PID_init(&chassis_move_init->chassis_angle_pid, PID_POSITION, chassis_yaw_pid, CHASSIS_FOLLOW_GIMBAL_PID_MAX_OUT, CHASSIS_FOLLOW_GIMBAL_PID_MAX_IOUT);
+    PID_init(&chassis_move_init->spin_rate_pid, PID_POSITION, spin_rate_pid,
+             CHASSIS_SPIN_RATE_PID_MAX_OUT, CHASSIS_SPIN_RATE_PID_MAX_IOUT);
     
 	
 	
@@ -165,6 +172,13 @@ static void chassis_init(chassis_move_t *chassis_move_init)
 	
     //更新一下数据
     chassis_feedback_update(chassis_move_init);
+    chassis_move_init->mode = CHASSIS_MODE_ZERO_FORCE;
+    chassis_move_init->robot_mode = ROBOT_ZERO_FORCE;
+    for (i = 0; i < 4; i++)
+    {
+        chassis_move_init->steering_motor[i].steering_ecd_angle_set =
+            chassis_move_init->steering_motor[i].steering_ecd_angle;
+    }
 }
 
 
@@ -231,43 +245,94 @@ static void chassis_feedback_update(chassis_move_t *chassis_move_update)
 /**
   *  获得解算值
  **/
-static void chassis_set_contorl(chassis_move_t *chassis_move_control)
+robot_mode_e robot_mode_choose(const RC_ctrl_t *rc)
 {
-
-    if (chassis_move_control == NULL)
+    if (rc == NULL) return ROBOT_SAFE;
+    switch (rc->rc.s[CHASSIS_RIGHT_SWITCH])
     {
+        case RC_SW_DOWN: return ROBOT_ZERO_FORCE;
+        case RC_SW_MID: return ROBOT_RC_DEBUG;
+        case RC_SW_UP: return ROBOT_SPIN;
+        default: return ROBOT_SAFE;
+    }
+}
+
+static void chassis_set_contorl(chassis_move_t *control)
+{
+    gimbal_chassis_command_t gimbal;
+    ins_motion_t ins;
+    chassis_mode_e last_mode;
+    int16_t vx_channel, vy_channel, wz_channel;
+    fp32 vx, vy, angle;
+    if (control == NULL) return;
+    last_mode = control->mode;
+    control->mode = CHASSIS_MODE_ZERO_FORCE;
+    control->vx_set = control->vy_set = control->wz_set = 0.0f;
+    control->rc_online = remote_control_snapshot(&control->rc_snapshot);
+    control->gimbal_online = gimbal_chassis_snapshot(&gimbal);
+    control->ins_online = INS_motion_snapshot(&ins);
+    control->ins_yaw = control->ins_online ? CHASSIS_INS_YAW_SIGN * ins.yaw : 0.0f;
+    control->ins_wz_dps = control->ins_online ? CHASSIS_INS_YAW_SIGN * ins.gyro_z * 180.0f / PI : 0.0f;
+    control->robot_mode = control->rc_online ? robot_mode_choose(&control->rc_snapshot) : ROBOT_SAFE;
+    control->chassis_relative_angle = control->gimbal_online ?
+        normalize_rad(gimbal.relative_angle * PI / 180.0f) : 0.0f;
+
+    switch (control->robot_mode)
+    {
+        case ROBOT_RC_DEBUG:
+            control->mode = CHASSIS_RC_DEBUG;
+            break;
+        case ROBOT_MOVE:
+            if (control->gimbal_online) control->mode = CHASSIS_FOLLOW_GIMBAL;
+            break;
+        case ROBOT_SPIN:
+            if (control->ins_online) control->mode = CHASSIS_SPIN;
+            break;
+        default:
+            /* Vision and shooting are not implemented on this chassis board. */
+            break;
+    }
+    if (control->mode != last_mode || control->mode == CHASSIS_MODE_ZERO_FORCE)
+        PID_clear(&control->chassis_angle_pid);
+    if (control->mode != last_mode || control->mode != CHASSIS_SPIN)
+    {
+        PID_clear(&control->spin_rate_pid);
+        control->spin_rate_set_dps = 0.0f;
+        control->spin_relative_yaw = 0.0f;
+        control->spin_reference_yaw = control->ins_yaw;
+    }
+    if (control->mode == CHASSIS_MODE_ZERO_FORCE) return;
+
+    rc_deadband_limit(control->rc_snapshot.rc.ch[CHASSIS_X_CHANNEL], vx_channel, CHASSIS_RC_DEADLINE);
+    rc_deadband_limit(control->rc_snapshot.rc.ch[CHASSIS_Y_CHANNEL], vy_channel, CHASSIS_RC_DEADLINE);
+    rc_deadband_limit(control->rc_snapshot.rc.ch[CHASSIS_WZ_CHANNEL], wz_channel, CHASSIS_RC_DEADLINE);
+    vx = fp32_constrain(vx_channel * CHASSIS_VX_RC_SEN, -NORMAL_MAX_CHASSIS_SPEED_X, NORMAL_MAX_CHASSIS_SPEED_X);
+    vy = fp32_constrain(-vy_channel * CHASSIS_VY_RC_SEN, -NORMAL_MAX_CHASSIS_SPEED_Y, NORMAL_MAX_CHASSIS_SPEED_Y);
+    if (control->mode == CHASSIS_RC_DEBUG)
+    {
+        control->vx_set = vx;
+        control->vy_set = vy;
+        control->wz_set = -wz_channel * CHASSIS_WZ_RC_SEN;
         return;
     }
-	
-	
-	if(switch_is_mid(chassis_move_control->chassis_RC->rc.s[0]))
-	{
-		int16_t vx_channel, vy_channel,wz_channel;
-		//死区限制，因为遥控器可能存在差异 摇杆在中间，其值不为0      摇杆活动范围要<-10或>10
-		rc_deadband_limit(chassis_move_control->chassis_RC->rc.ch[CHASSIS_X_CHANNEL], vx_channel, CHASSIS_RC_DEADLINE);
-		rc_deadband_limit(chassis_move_control->chassis_RC->rc.ch[CHASSIS_Y_CHANNEL], vy_channel, CHASSIS_RC_DEADLINE);
-		rc_deadband_limit(chassis_move_control->chassis_RC->rc.ch[CHASSIS_WZ_CHANNEL],wz_channel,CHASSIS_RC_DEADLINE);	
-		
-		
-		
-		//根据得到的摇杆值转化成速度
-		chassis_move_control->vx_set = vx_channel * CHASSIS_VX_RC_SEN;   // m/s
-		chassis_move_control->vy_set = vy_channel * -CHASSIS_VY_RC_SEN;  // m/s
-		chassis_move_control->wz_set = -wz_channel * -CHASSIS_WZ_RC_SEN;	//  度/s
-		
-	}
-	else if(switch_is_down(chassis_move_control->chassis_RC->rc.s[0]))
-	{
-		chassis_move_control->vx_set=0.0f;
-		chassis_move_control->vy_set=0.0f;
-		chassis_move_control->wz_set=0.0f;
-		return;		
-	}
-	
-	
-	
-
-
+    if (control->mode == CHASSIS_SPIN)
+    {
+        control->spin_relative_yaw = normalize_rad(control->ins_yaw - control->spin_reference_yaw);
+        angle = control->spin_relative_yaw;
+        control->spin_rate_set_dps += fp32_constrain(CHASSIS_SPIN_SPEED_DPS - control->spin_rate_set_dps,
+            -CHASSIS_SPIN_ACCEL_DPS2 * CHASSIS_CONTROL_TIME, CHASSIS_SPIN_ACCEL_DPS2 * CHASSIS_CONTROL_TIME);
+        /* Feed forward the desired rate; the outer loop corrects measured yaw rate. */
+        control->wz_set = fp32_constrain(control->spin_rate_set_dps +
+            PID_calc(&control->spin_rate_pid, control->ins_wz_dps, control->spin_rate_set_dps),
+            -CHASSIS_SPIN_MAX_COMMAND_DPS, CHASSIS_SPIN_MAX_COMMAND_DPS);
+    }
+    else
+    {
+        angle = control->chassis_relative_angle;
+        control->wz_set = -PID_calc(&control->chassis_angle_pid, angle, 0.0f) * 180.0f / PI;
+    }
+    control->vx_set = arm_cos_f32(angle) * vx + arm_sin_f32(angle) * vy;
+    control->vy_set = -arm_sin_f32(angle) * vx + arm_cos_f32(angle) * vy;
 }
 
 
@@ -301,20 +366,31 @@ static void chassis_motor_moving_solution(const fp32 vx_set, const fp32 vy_set, 
 	fp32 vw_set =wz_set*3.14f/180.0f * CHASSIS_CENTER_TO_WHEEL;  //转化弧度线速度
 	fp32 rpm_ratio=60.0f/(CHASSIS_MOTOT_PER*0.0526f);
 
+    if (vx_set == 0.0f && vy_set == 0.0f && wz_set == 0.0f)
+    {
+        for (i = 0; i < 4; i++) chassis_move_solution->motor_chassis[i].speed_set = 0.0f;
+        return; /* Hold steering direction when sticks are centered. */
+    }
+
 	
 	
+	
+//	//赋值四个舵向轮角度
+////	wheel_angle[0]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));
+////	wheel_angle[1]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));
+////	wheel_angle[2]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));
+////	wheel_angle[3]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));	
+//	 
+//	wheel_angle[0]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));
+//	wheel_angle[1]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));
+//	wheel_angle[2]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));
+//	wheel_angle[3]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));		
 	
 	//赋值四个舵向轮角度
-//	wheel_angle[0]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));
-//	wheel_angle[1]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));
-//	wheel_angle[2]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));
-//	wheel_angle[3]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));	
-	 
-	wheel_angle[0]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));
-	wheel_angle[1]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));
-	wheel_angle[2]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));
-	wheel_angle[3]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));		
-	
+	wheel_angle[0]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));
+	wheel_angle[1]=atan2((vy_set+vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));
+	wheel_angle[2]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set+vw_set*arm_sin_f32(theta)));
+	wheel_angle[3]=atan2((vy_set-vw_set*arm_cos_f32(theta)),(vx_set-vw_set*arm_sin_f32(theta)));	
 	
 	for(i=0;i<4;i++)
 	{
@@ -343,17 +419,23 @@ static void chassis_motor_moving_solution(const fp32 vx_set, const fp32 vy_set, 
 	}
 	
 	
+//	
+//	//赋值四个轮向速度大小并有m/s转化为rpm
+////	wheel_speed[0]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左前
+////	wheel_speed[1]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右前
+////	wheel_speed[2]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右后
+////	wheel_speed[3]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左后
+//	
+//	wheel_speed[0]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左前
+//	wheel_speed[1]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右前
+//	wheel_speed[2]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右后
+//	wheel_speed[3]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左后	
 	
 	//赋值四个轮向速度大小并有m/s转化为rpm
-//	wheel_speed[0]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左前
-//	wheel_speed[1]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右前
-//	wheel_speed[2]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右后
-//	wheel_speed[3]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左后
-	
-	wheel_speed[0]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左前
-	wheel_speed[1]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右前
-	wheel_speed[2]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右后
-	wheel_speed[3]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左后	
+	wheel_speed[0]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左前
+	wheel_speed[1]=sqrt(pow((vy_set+vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右前
+	wheel_speed[2]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set+vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //右后
+	wheel_speed[3]=sqrt(pow((vy_set-vw_set*arm_cos_f32(theta)),2)+pow((vx_set-vw_set*arm_sin_f32(theta)),2))*rpm_ratio;  //左后
 	
 	for(i=0;i<4;i++)
 	{
@@ -382,6 +464,24 @@ static void chassis_control_loop(chassis_move_t *chassis_move_control_loop)
 {
 
     uint8_t i = 0;
+
+    if (chassis_move_control_loop->mode == CHASSIS_MODE_ZERO_FORCE)
+    {
+        for (i = 0; i < 4; i++)
+        {
+            chassis_move_control_loop->motor_chassis[i].speed_set = 0.0f;
+            chassis_move_control_loop->motor_chassis[i].give_current_set = 0.0f;
+            chassis_move_control_loop->motor_chassis[i].give_current = 0;
+            chassis_move_control_loop->steering_motor[i].steering_current_set = 0.0f;
+            chassis_move_control_loop->steering_motor[i].steering_given_current = 0;
+            chassis_move_control_loop->steering_motor[i].steering_ecd_angle_set =
+                chassis_move_control_loop->steering_motor[i].steering_ecd_angle;
+            chassis_move_control_loop->steering_motor[i].steering_turn_flag = 0;
+            PID_clear(&chassis_move_control_loop->motor_speed_pid[i]);
+            PID_clear(&chassis_move_control_loop->steering_motor[i].steering_motor_relative_angle_pid);
+        }
+        return;
+    }
 
 	
 	//驱动电机
@@ -417,5 +517,4 @@ static void chassis_CAN_Send(void)
 	CAN_cmd_chassis(chassis_move.motor_chassis[0].give_current,chassis_move.motor_chassis[1].give_current,chassis_move.motor_chassis[2].give_current,chassis_move.motor_chassis[3].give_current);
 			
 }
-
 

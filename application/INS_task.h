@@ -25,6 +25,16 @@
 #define INS_Task_H
 #include "struct_typedef.h"
 
+#define INS_MOTION_TIMEOUT_MS 20u
+
+typedef struct
+{
+    fp32 yaw;     /* radians, after installation transform */
+    fp32 gyro_z;  /* radians/s, after calibration and installation transform */
+} ins_motion_t;
+
+extern uint8_t INS_motion_snapshot(ins_motion_t *snapshot);
+
 
 #define SPI_DMA_GYRO_LENGHT       8
 #define SPI_DMA_ACCEL_LENGHT      9

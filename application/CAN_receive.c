@@ -47,6 +47,25 @@ motor data,  0:chassis motor1 3508;1:chassis motor3 3508;2:chassis motor3 3508;3
 static motor_measure_t motor_chassis[7];
 
 static motor_measure_t steering_motor[4];
+static gimbal_chassis_command_t gimbal_chassis_command;
+static volatile uint32_t gimbal_last_frame_ms;
+static volatile uint8_t gimbal_frame_received;
+
+uint8_t gimbal_chassis_snapshot(gimbal_chassis_command_t *snapshot)
+{
+    uint32_t irq_state, last_ms, now_ms;
+    uint8_t received;
+    if (snapshot == NULL) return 0;
+    irq_state = __get_PRIMASK();
+    __disable_irq();
+    *snapshot = gimbal_chassis_command;
+    last_ms = gimbal_last_frame_ms;
+    received = gimbal_frame_received;
+    now_ms = HAL_GetTick();
+    __set_PRIMASK(irq_state);
+    return received && (uint32_t)(now_ms - last_ms) < GIMBAL_COMMAND_TIMEOUT_MS &&
+           snapshot->relative_angle >= -360 && snapshot->relative_angle <= 360;
+}
 	
 	
 	
@@ -76,7 +95,11 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
     CAN_RxHeaderTypeDef rx_header;
     uint8_t rx_data[8];
 
-    HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header, rx_data);
+    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rx_header, rx_data) != HAL_OK ||
+        rx_header.IDE != CAN_ID_STD || rx_header.RTR != CAN_RTR_DATA || rx_header.DLC != 8)
+    {
+        return;
+    }
 
 	
 	
@@ -87,6 +110,16 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 	{
 		switch (rx_header.StdId)
 		{
+            case CAN_GIMBAL_CHASSIS_ID:
+            {
+                gimbal_chassis_command.vx = (int16_t)((uint16_t)rx_data[0] << 8 | rx_data[1]);
+                gimbal_chassis_command.vy = (int16_t)((uint16_t)rx_data[2] << 8 | rx_data[3]);
+                gimbal_chassis_command.relative_angle = (int16_t)((uint16_t)rx_data[4] << 8 | rx_data[5]);
+                gimbal_chassis_command.mode = (int16_t)((uint16_t)rx_data[6] << 8 | rx_data[7]);
+                gimbal_last_frame_ms = HAL_GetTick();
+                gimbal_frame_received = 1;
+                break;
+            }
 			case CAN_3508_M1_ID:
 			case CAN_3508_M2_ID:
 			case CAN_3508_M3_ID:
@@ -343,7 +376,6 @@ void CAN_cmd_steering_chassis(int16_t motor1, int16_t motor2, int16_t motor3, in
 
     HAL_CAN_AddTxMessage(&GIMBAL_CAN, &steering_tx_message, steering_can_send_data, &mail_box);
 }
-
 
 
 

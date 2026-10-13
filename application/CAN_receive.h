@@ -25,6 +25,18 @@
 
 #define CHASSIS_CAN hcan1
 #define GIMBAL_CAN hcan2
+#define CAN_GIMBAL_CHASSIS_ID 0x250u
+#define GIMBAL_COMMAND_TIMEOUT_MS 100u
+
+typedef struct
+{
+    int16_t vx;
+    int16_t vy;
+    int16_t relative_angle; /* degrees, gimbal yaw relative to chassis */
+    int16_t mode;           /* legacy upper-board mode, not the local mode selector */
+} gimbal_chassis_command_t;
+
+extern uint8_t gimbal_chassis_snapshot(gimbal_chassis_command_t *snapshot);
 
 /* CAN send and receive ID */
 typedef enum

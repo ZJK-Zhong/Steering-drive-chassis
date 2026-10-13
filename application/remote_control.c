@@ -55,6 +55,8 @@ static void sbus_to_rc(volatile const uint8_t *sbus_buf, RC_ctrl_t *rc_ctrl);
 //remote control data 
 //遥控器控制变量
 RC_ctrl_t rc_ctrl;
+static volatile uint32_t rc_last_frame_ms;
+static volatile uint8_t rc_frame_received;
 //接收原始数据，为18个字节，给了36个字节长度，防止DMA传输越界
 static uint8_t sbus_rx_buf[2][SBUS_RX_BUF_NUM];
 
@@ -86,6 +88,31 @@ void remote_control_init(void)
 const RC_ctrl_t *get_remote_control_point(void)
 {
     return &rc_ctrl;
+}
+
+uint8_t remote_control_snapshot(RC_ctrl_t *snapshot)
+{
+    uint32_t irq_state, last_ms, now_ms;
+    uint8_t received, i;
+    if (snapshot == NULL) return 0;
+    irq_state = __get_PRIMASK();
+    __disable_irq();
+    *snapshot = rc_ctrl;
+    last_ms = rc_last_frame_ms;
+    received = rc_frame_received;
+    now_ms = HAL_GetTick();
+    __set_PRIMASK(irq_state);
+    if (!received || (uint32_t)(now_ms - last_ms) >= RC_CONTROL_TIMEOUT_MS) return 0;
+    for (i = 0; i < 4; i++)
+    {
+        if (snapshot->rc.ch[i] > RC_CHANNAL_ERROR_VALUE ||
+            snapshot->rc.ch[i] < -RC_CHANNAL_ERROR_VALUE) return 0;
+    }
+    for (i = 0; i < 2; i++)
+    {
+        if (snapshot->rc.s[i] < RC_SW_UP || snapshot->rc.s[i] > RC_SW_MID) return 0;
+    }
+    return 1;
 }
 
 //判断遥控器数据是否出错，
@@ -184,6 +211,8 @@ void USART3_IRQHandler(void)
             if(this_time_rx_len == RC_FRAME_LENGTH)
             {
                 sbus_to_rc(sbus_rx_buf[0], &rc_ctrl);
+                rc_last_frame_ms = HAL_GetTick();
+                rc_frame_received = 1;
                 //记录数据接收时间
                 detect_hook(DBUS_TOE);
                 sbus_to_usart1(sbus_rx_buf[0]);
@@ -216,6 +245,8 @@ void USART3_IRQHandler(void)
             {
                 //处理遥控器数据
                 sbus_to_rc(sbus_rx_buf[1], &rc_ctrl);
+                rc_last_frame_ms = HAL_GetTick();
+                rc_frame_received = 1;
                 //记录数据接收时间
                 detect_hook(DBUS_TOE);
                 sbus_to_usart1(sbus_rx_buf[1]);
@@ -261,8 +292,8 @@ static void sbus_to_rc(volatile const uint8_t *sbus_buf, RC_ctrl_t *rc_ctrl)
     rc_ctrl->rc.ch[2] = ((sbus_buf[2] >> 6) | (sbus_buf[3] << 2) |          //!< Channel 2
                          (sbus_buf[4] << 10)) &0x07ff;
     rc_ctrl->rc.ch[3] = ((sbus_buf[4] >> 1) | (sbus_buf[5] << 7)) & 0x07ff; //!< Channel 3
-    rc_ctrl->rc.s[0] = ((sbus_buf[5] >> 4) & 0x0003);                  //!< Switch left
-    rc_ctrl->rc.s[1] = ((sbus_buf[5] >> 4) & 0x000C) >> 2;                       //!< Switch right
+    rc_ctrl->rc.s[0] = ((sbus_buf[5] >> 4) & 0x0003);                  //!< Switch 0 (physical right on tested remote)
+    rc_ctrl->rc.s[1] = ((sbus_buf[5] >> 4) & 0x000C) >> 2;             //!< Switch 1 (physical left on tested remote)
     rc_ctrl->mouse.x = sbus_buf[6] | (sbus_buf[7] << 8);                    //!< Mouse X axis
     rc_ctrl->mouse.y = sbus_buf[8] | (sbus_buf[9] << 8);                    //!< Mouse Y axis
     rc_ctrl->mouse.z = sbus_buf[10] | (sbus_buf[11] << 8);                  //!< Mouse Z axis
@@ -300,4 +331,3 @@ void sbus_to_usart1(uint8_t *sbus)
     }
     usart1_tx_dma_enable(usart_tx_buf, 20);
 }
-

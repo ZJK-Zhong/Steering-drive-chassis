@@ -25,6 +25,7 @@
 #define SBUS_RX_BUF_NUM 36u
 
 #define RC_FRAME_LENGTH 18u
+#define RC_CONTROL_TIMEOUT_MS 100u
 
 #define RC_CH_VALUE_MIN         ((uint16_t)364)
 #define RC_CH_VALUE_OFFSET      ((uint16_t)1024)
@@ -81,6 +82,7 @@ typedef __packed struct
 
 extern void remote_control_init(void);
 extern const RC_ctrl_t *get_remote_control_point(void);
+extern uint8_t remote_control_snapshot(RC_ctrl_t *snapshot);
 extern uint8_t RC_data_is_error(void);
 extern void slove_RC_lost(void);
 extern void slove_data_error(void);

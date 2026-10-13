@@ -42,7 +42,43 @@
 
 //the channel of choosing chassis mode,
 //选择底盘状态 开关通道号
-#define CHASSIS_MODE_CHANNEL 0
+/* Physical mapping verified on this remote, not the old DBUS parser labels. */
+#define CHASSIS_LEFT_SWITCH 1
+#define CHASSIS_RIGHT_SWITCH 0
+#define CHASSIS_MODE_CHANNEL CHASSIS_RIGHT_SWITCH
+#define CHASSIS_SPIN_SPEED_DPS 120.0f
+#define CHASSIS_SPIN_ACCEL_DPS2 60.0f
+#define CHASSIS_SPIN_MAX_COMMAND_DPS 180.0f
+/* INS yaw/rate positive direction must match positive kinematic wz_set. */
+#define CHASSIS_INS_YAW_SIGN 1.0f
+#define CHASSIS_SPIN_RATE_PID_KP 0.3f
+#define CHASSIS_SPIN_RATE_PID_KI 0.0f
+#define CHASSIS_SPIN_RATE_PID_KD 0.0f
+#define CHASSIS_SPIN_RATE_PID_MAX_OUT 30.0f
+#define CHASSIS_SPIN_RATE_PID_MAX_IOUT 0.0f
+
+typedef enum
+{
+    ROBOT_SAFE = 0,
+    ROBOT_ZERO_FORCE,
+    ROBOT_FRICTION_ONLY,
+    ROBOT_FIRE,
+    ROBOT_COMPETITION,
+    ROBOT_MOVE,
+    ROBOT_SPIN,
+    ROBOT_GIMBAL_FIRE,
+    ROBOT_RC_DEBUG
+} robot_mode_e;
+
+typedef enum
+{
+    CHASSIS_MODE_ZERO_FORCE = 0,
+    CHASSIS_RC_DEBUG,
+    CHASSIS_FOLLOW_GIMBAL,
+    CHASSIS_SPIN
+} chassis_mode_e;
+
+extern robot_mode_e robot_mode_choose(const RC_ctrl_t *rc);
 //rocker value (max 660) change to vertial speed (m/s) 
 //遥控器前进摇杆（max 660）转化成车体前进速度（m/s）的比例
 #define CHASSIS_VX_RC_SEN 0.006f
@@ -81,7 +117,7 @@
 #define CHASSIS_CONTROL_FREQUENCE 500.0f
 //chassis 3508 max motor control current
 //底盘3508最大can发送电流值
-#define MAX_MOTOR_CAN_CURRENT 160000.0f
+#define MAX_MOTOR_CAN_CURRENT 16000.0f
 //press the key, chassis will swing
 //底盘摇摆按键
 #define SWING_KEY KEY_PRESSED_OFFSET_CTRL
@@ -155,7 +191,7 @@
 #define STEERING_ENCODE_RELATIVE_PID_KP        360.0f  //2000
 #define STEERING_ENCODE_RELATIVE_PID_KI        0.0f
 #define STEERING_ENCODE_RELATIVE_PID_KD        0.0f
-#define STEERING_ENCODE_RELATIVE_PID_MAX_OUT   100000.0f
+#define STEERING_ENCODE_RELATIVE_PID_MAX_OUT   30000.0f
 #define STEERING_ENCODE_RELATIVE_PID_MAX_IOUT  0.0f
 
 
@@ -218,6 +254,18 @@ typedef struct
 typedef struct
 {
   const RC_ctrl_t *chassis_RC;               //底盘使用的遥控器指针, the point to remote control
+  RC_ctrl_t rc_snapshot;
+  robot_mode_e robot_mode;   /* requested mode, selected by the right switch only */
+  chassis_mode_e mode;       /* actual chassis mode after safety checks */
+  uint8_t rc_online;
+  uint8_t gimbal_online;
+  uint8_t ins_online;
+  fp32 ins_yaw;              /* radians, mapped into chassis coordinates */
+  fp32 ins_wz_dps;           /* degrees/s, same sign as wz_set */
+  fp32 spin_reference_yaw;   /* yaw captured on entry, radians */
+  fp32 spin_relative_yaw;    /* current yaw minus entry yaw, radians */
+  fp32 spin_rate_set_dps;     /* ramped angular speed target */
+  pid_type_def spin_rate_pid;
   const gimbal_motor_t *chassis_yaw_motor;   //will use the relative angle of yaw gimbal motor to calculate the euler angle.底盘使用到yaw云台电机的相对角度来计算底盘的欧拉角.
   const gimbal_motor_t *chassis_pitch_motor; //will use the relative angle of pitch gimbal motor to calculate the euler angle.底盘使用到pitch云台电机的相对角度来计算底盘的欧拉角
   const fp32 *chassis_INS_angle;             //the point to the euler angle of gyro sensor.获取陀螺仪解算出的欧拉角指针
@@ -234,7 +282,7 @@ typedef struct
   fp32 wz;                          //chassis rotation speed, positive means counterclockwise,unit rad/s.底盘旋转角速度，逆时针为正 单位 rad/s
   fp32 vx_set;                      //chassis set vertical speed,positive means forward,unit m/s.底盘设定速度 前进方向 前为正，单位 m/s
   fp32 vy_set;                      //chassis set horizontal speed,positive means left,unit m/s.底盘设定速度 左右方向 左为正，单位 m/s
-  fp32 wz_set;                      //chassis set rotation speed,positive means counterclockwise,unit rad/s.底盘设定旋转角速度，逆时针为正 单位 rad/s
+  fp32 wz_set;                      // chassis rotation set-point, degrees/s
   fp32 chassis_relative_angle;      //the relative angle between chassis and gimbal.底盘与云台的相对角度，单位 rad
   fp32 chassis_relative_angle_set;  //the set relative angle.设置相对云台控制角度
   fp32 chassis_yaw_set;             

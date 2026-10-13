@@ -158,6 +158,39 @@ static fp32 INS_mag[3] = {0.0f, 0.0f, 0.0f};
 static fp32 INS_quat[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 fp32 INS_angle[3] = {0.0f, 0.0f, 0.0f};      //euler angle, unit rad.欧拉角 单位 rad
 
+static ins_motion_t ins_motion;
+static uint32_t ins_motion_last_ms;
+static uint8_t ins_motion_received;
+
+static void ins_motion_publish(fp32 yaw, fp32 gyro_z)
+{
+    uint32_t irq_state = __get_PRIMASK();
+    __disable_irq();
+    ins_motion.yaw = yaw;
+    ins_motion.gyro_z = gyro_z;
+    ins_motion_last_ms = HAL_GetTick();
+    ins_motion_received = 1;
+    __set_PRIMASK(irq_state);
+}
+
+uint8_t INS_motion_snapshot(ins_motion_t *snapshot)
+{
+    uint32_t irq_state, now_ms, last_ms;
+    uint8_t received;
+    if (snapshot == NULL) return 0;
+    irq_state = __get_PRIMASK();
+    __disable_irq();
+    *snapshot = ins_motion;
+    last_ms = ins_motion_last_ms;
+    received = ins_motion_received;
+    now_ms = HAL_GetTick();
+    __set_PRIMASK(irq_state);
+    /* Range comparisons also reject NaN and infinity before kinematics/PID. */
+    return received && (uint32_t)(now_ms - last_ms) < INS_MOTION_TIMEOUT_MS &&
+           snapshot->yaw >= -3.2f && snapshot->yaw <= 3.2f &&
+           snapshot->gyro_z >= -35.0f && snapshot->gyro_z <= 35.0f;
+}
+
 
 
 
@@ -174,6 +207,7 @@ fp32 INS_angle[3] = {0.0f, 0.0f, 0.0f};      //euler angle, unit rad.欧拉角 单位
 
 void INS_task(void const *pvParameters)
 {
+    uint8_t gyro_updated;
     //wait a time
     osDelay(INS_TASK_INIT_TIME);
     while(BMI088_init())
@@ -221,10 +255,12 @@ void INS_task(void const *pvParameters)
         }
 
 
+        gyro_updated = 0;
         if(gyro_update_flag & (1 << IMU_UPDATE_SHFITS))
         {
             gyro_update_flag &= ~(1 << IMU_UPDATE_SHFITS);
             BMI088_gyro_read_over(gyro_dma_rx_buf + BMI088_GYRO_RX_BUF_DATA_OFFSET, bmi088_real_data.gyro);
+            gyro_updated = 1;
         }
 
         if(accel_update_flag & (1 << IMU_UPDATE_SHFITS))
@@ -265,6 +301,10 @@ void INS_task(void const *pvParameters)
 
         AHRS_update(INS_quat, timing_time, INS_gyro, accel_fliter_3, INS_mag);
         get_angle(INS_quat, INS_angle + INS_YAW_ADDRESS_OFFSET, INS_angle + INS_PITCH_ADDRESS_OFFSET, INS_angle + INS_ROLL_ADDRESS_OFFSET);
+        if (gyro_updated)
+        {
+            ins_motion_publish(INS_angle[INS_YAW_ADDRESS_OFFSET], INS_gyro[2]);
+        }
 
         //because no use ist8310 and save time, no use
         if(mag_update_flag &= 1 << IMU_DR_SHFITS)
@@ -648,4 +688,3 @@ void DMA2_Stream2_IRQHandler(void)
         }
     }
 }
-
