@@ -36,22 +36,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "bsp_can.h"
-#include "bsp_delay.h"
-#include "bsp_usart.h"
-#include "remote_control.h"
+#include "robot.h"
 #include <stdarg.h>
 #include "stdio.h"
-#include "calibrate_task.h"
-#include "chassis_task.h"
-#include "detect_task.h"
-#include "gimbal_task.h"
-#include "INS_task.h"
-#include "led_flow_task.h"
-#include "oled_task.h"
-#include "referee_usart_task.h"
-#include "usb_task.h"
-#include "voltage_task.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -96,7 +83,7 @@ void MX_FREERTOS_Init(void);
 //    va_start(ap, fmt);
 
 //    //return length of string 
-//    //·µ»Ø×Ö·û´®³¤¶È
+//    //è¿”å›žå­—ç¬¦ä¸²é•¿åº¦
 //    len = vsprintf((char *)tx_buf, fmt, ap);
 
 //    va_end(ap);
@@ -159,11 +146,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
-    can_filter_init();
-    delay_init();
-    cali_param_init();
-    remote_control_init();
-    usart1_tx_dma_init();
+    RobotInit();
   /* USER CODE END 2 */
 
   /* Call init function for freertos objects (in freertos.c) */

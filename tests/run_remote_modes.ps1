@@ -25,7 +25,9 @@ $defines = @($controls.Define.Split(',') | Select-Object -Unique | Where-Object 
 $compiler = Join-Path $KeilRoot 'ARM\ARMCC\bin\armcc.exe'
 $assembler = Join-Path $KeilRoot 'ARM\ARMCC\bin\armasm.exe'
 $linker = Join-Path $KeilRoot 'ARM\ARMCC\bin\armlink.exe'
-$sources = @('tests\remote_modes_test.c', 'components\controller\pid.c', 'components\algorithm\user_lib.c')
+$sources = @('tests\remote_modes_test.c', 'components\controller\pid.c', 'components\algorithm\user_lib.c',
+    'application\robot.c', 'application\cmd\robot_cmd.c', 'modules\message_center\message_center.c',
+    'modules\swerve\swerve_kinematics.c', 'modules\swerve\swerve_module.c')
 $objects = @()
 foreach ($source in $sources) {
     $object = Join-Path $outputRoot (([IO.Path]::GetFileNameWithoutExtension($source)) + '.o')
