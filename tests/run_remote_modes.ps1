@@ -4,6 +4,7 @@ param(
     [string]$PythonExecutable = 'python'
 )
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'check_architecture.ps1')
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $mdkRoot = Join-Path $projectRoot 'MDK-ARM'
 $outputRoot = Join-Path $mdkRoot 'standard_tpye_c\remote_mode_tests'
@@ -27,7 +28,7 @@ $assembler = Join-Path $KeilRoot 'ARM\ARMCC\bin\armasm.exe'
 $linker = Join-Path $KeilRoot 'ARM\ARMCC\bin\armlink.exe'
 $sources = @('tests\remote_modes_test.c', 'components\controller\pid.c', 'components\algorithm\user_lib.c',
     'application\robot.c', 'application\cmd\robot_cmd.c', 'modules\message_center\message_center.c',
-    'modules\swerve\swerve_kinematics.c', 'modules\swerve\swerve_module.c')
+    'modules\swerve\swerve_kinematics.c', 'modules\swerve\swerve_module.c', 'bsp\boards\bsp_runtime.c')
 $objects = @()
 foreach ($source in $sources) {
     $object = Join-Path $outputRoot (([IO.Path]::GetFileNameWithoutExtension($source)) + '.o')

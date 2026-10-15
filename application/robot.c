@@ -17,11 +17,12 @@ void RobotInit(void)
     usart1_tx_dma_init();
     MessageCenterInit();
     RobotCMDInit();
+    ChassisInit();
 }
 
-void RobotControlInit(void)
+void RobotControlEnable(void)
 {
-    ChassisInit();
+    ChassisEnable();
 }
 
 void RobotTask(void)

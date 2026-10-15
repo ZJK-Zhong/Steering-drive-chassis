@@ -184,13 +184,15 @@ static void test_dbus_parser_and_output_limits(void)
     {
         const float speed_pid[3] = {M3505_MOTOR_SPEED_PID_KP, 0, 0};
         const float steering_pid[3] = {STEERING_ENCODE_RELATIVE_PID_KP, 0, 0};
-        PID_init(&chassis_move.motor_speed_pid[i], PID_POSITION, speed_pid,
+        PID_init(&chassis_move.swerve_wheels[i].drive_pid, PID_POSITION, speed_pid,
                  MAX_MOTOR_CAN_CURRENT, 0);
-        PID_init(&chassis_move.steering_motor[i].steering_motor_relative_angle_pid,
+        PID_init(&chassis_move.swerve_wheels[i].steering_pid,
                  PID_POSITION, steering_pid, STEERING_ENCODE_RELATIVE_PID_MAX_OUT, 0);
         chassis_move.motor_chassis[i].speed = 0;
         chassis_move.motor_chassis[i].speed_set = 100000;
         chassis_move.steering_motor[i].steering_ecd_angle = 0;
+        chassis_move.swerve_wheels[i].steering_angle_deg = 0;
+        chassis_move.swerve_wheels[i].feedback.speed_rpm = 0;
         chassis_move.steering_motor[i].steering_ecd_angle_set = 10000;
     }
     WheelControl(&chassis_move);
@@ -405,10 +407,10 @@ static void test_timeout_and_zero_force(void)
     {
         chassis_move.motor_chassis[i].give_current = 1234;
         chassis_move.motor_chassis[i].give_current_set = 1234;
-        chassis_move.motor_speed_pid[i].Iout = 10;
+        chassis_move.swerve_wheels[i].drive_pid.Iout = 10;
         chassis_move.steering_motor[i].steering_given_current = -2345;
         chassis_move.steering_motor[i].steering_current_set = -2345;
-        chassis_move.steering_motor[i].steering_motor_relative_angle_pid.Iout = 10;
+        chassis_move.swerve_wheels[i].steering_pid.Iout = 10;
     }
     WheelControl(&chassis_move);
     for (i = 0; i < 4; i++)
@@ -533,6 +535,190 @@ static void test_kinematics_parity(void)
     }
 }
 
+typedef struct
+{
+    SwerveWheelFeedback_s feedback;
+    SwerveWheelCommand_s command;
+    int16_t drive_current, steering_current;
+    uint8_t online;
+    unsigned writes;
+} TestWheelPort_s;
+
+static uint8_t test_wheel_read(void *context, SwerveWheelFeedback_s *feedback)
+{
+    TestWheelPort_s *port = context;
+    if (!port->online) return 0;
+    *feedback = port->feedback;
+    return 1;
+}
+
+static void test_wheel_write(void *context, const SwerveWheelCommand_s *command,
+    int16_t drive_current, int16_t steering_current)
+{
+    TestWheelPort_s *port = context;
+    port->command = *command;
+    port->drive_current = drive_current;
+    port->steering_current = steering_current;
+    port->writes++;
+}
+
+static void test_wheel_instance(void)
+{
+    SwerveWheelInstance_s wheel;
+    SwerveWheelConfig_s config = {4096, {5, 0, 0}, 16000, 0,
+        {360, 0, 0}, 30000, 0};
+    TestWheelPort_s fake = {{4096, 20}, {0, 0, 0}, 0, 0, 1, 0};
+    SwerveWheelPort_s port = {test_wheel_read, test_wheel_write, &fake};
+    SwerveWheelCommand_s command = {100, 5, 1};
+    union { uint32_t bits; float value; } invalid;
+    float previous_angle;
+    assert(!SwerveWheelRegister(NULL, &config, &port));
+    assert(!SwerveWheelRegister(&wheel, NULL, &port));
+    assert(!wheel.registered);
+    SwerveWheelUpdate(NULL);
+    SwerveWheelSetTarget(NULL, &command);
+    SwerveWheelControl(NULL, 1);
+    SwerveWheelStop(NULL);
+    SwerveWheelWrite(NULL);
+    port.read_feedback = NULL;
+    assert(!SwerveWheelRegister(&wheel, &config, &port));
+    port.read_feedback = test_wheel_read;
+    config.drive_max_out = 40000;
+    assert(!SwerveWheelRegister(&wheel, &config, &port));
+    config.drive_max_out = 16000;
+    memset(&wheel, 0xa5, sizeof(wheel));
+    assert(SwerveWheelRegister(&wheel, &config, &port));
+    close_to(wheel.drive_pid.set, 0);
+    close_to(wheel.drive_pid.fdb, 0);
+    close_to(wheel.steering_pid.set, 0);
+    close_to(wheel.steering_pid.fdb, 0);
+    close_to(wheel.steering_angle_deg, 0);
+    SwerveWheelSetTarget(&wheel, &command);
+    SwerveWheelControl(&wheel, 1);
+    SwerveWheelWrite(&wheel);
+    assert(fake.writes == 1 && fake.drive_current == 400 && fake.steering_current == -1800);
+    assert(fake.command.reversed == 1); /* Signed speed must not be negated twice. */
+    command.speed_rpm = -100000;
+    command.angle_deg = 10000;
+    SwerveWheelSetTarget(&wheel, &command);
+    SwerveWheelControl(&wheel, 1);
+    assert(wheel.drive_current == -16000 && wheel.steering_current == -30000);
+    wheel.drive_pid.Iout = wheel.steering_pid.Iout = 10;
+    SwerveWheelControl(&wheel, 0);
+    assert(wheel.drive_current == 0 && wheel.steering_current == 0);
+    close_to(wheel.drive_pid.Iout, 0);
+    close_to(wheel.steering_pid.Iout, 0);
+    close_to(wheel.command.speed_rpm, 0);
+    close_to(wheel.command.angle_deg, wheel.steering_angle_deg);
+    assert(!wheel.command.reversed);
+
+    fake.feedback.encoder = 8190;
+    assert(SwerveWheelUpdate(&wheel));
+    previous_angle = wheel.steering_angle_deg;
+    fake.feedback.encoder = 2;
+    assert(SwerveWheelUpdate(&wheel));
+    close_to(wheel.steering_angle_deg - previous_angle, -4.0f * 360 / 8192);
+    fake.feedback.encoder = 8190;
+    assert(SwerveWheelUpdate(&wheel));
+    close_to(wheel.steering_angle_deg, previous_angle);
+
+    fake.online = 0;
+    assert(!SwerveWheelUpdate(&wheel));
+    SwerveWheelControl(&wheel, 1);
+    SwerveWheelWrite(&wheel);
+    assert(fake.writes == 2 && !fake.drive_current && !fake.steering_current);
+    fake.online = 1;
+    fake.feedback.encoder = 8192;
+    assert(!SwerveWheelUpdate(&wheel));
+    fake.feedback.encoder = 4096;
+    assert(SwerveWheelUpdate(&wheel));
+    invalid.bits = 0x7fc00000u;
+    command.angle_deg = invalid.value;
+    SwerveWheelSetTarget(&wheel, &command);
+    SwerveWheelControl(&wheel, 1);
+    assert(!wheel.drive_current && !wheel.steering_current);
+    fake.feedback.speed_rpm = invalid.value;
+    assert(!SwerveWheelUpdate(&wheel));
+}
+
+static void test_startup_gate(void)
+{
+    unsigned i;
+    assert(!chassis_move.control_enabled);
+    for (i = 0; i < 4; i++) assert(chassis_move.swerve_wheels[i].registered);
+    test_sent = 0;
+    remote_frame(RC_SW_UP, RC_SW_MID);
+    rc_ctrl.rc.ch[1] = 100;
+    RobotTask();
+    assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE && test_sent == 2);
+    ins_motion_publish(0.7f, 0);
+    remote_frame(RC_SW_MID, RC_SW_UP);
+    RobotTask();
+    assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE && test_sent == 4);
+    close_to(chassis_move.spin_rate_set_dps, 0);
+    RobotControlEnable();
+    assert(chassis_move.control_enabled);
+    chassis_move.swerve_wheels[0].command.angle_deg = 43;
+    chassis_move.swerve_wheels[0].drive_pid.Iout = 7;
+    RobotControlEnable();
+    close_to(chassis_move.swerve_wheels[0].command.angle_deg, 43);
+    close_to(chassis_move.swerve_wheels[0].drive_pid.Iout, 7);
+    SwerveWheelStop(&chassis_move.swerve_wheels[0]);
+    remote_frame(RC_SW_DOWN, RC_SW_DOWN);
+    ins_motion_received = 0;
+    test_sent = 0;
+}
+
+static void test_runtime_critical(void)
+{
+    uint32_t original = __get_PRIMASK();
+    uint32_t outer, inner;
+    MessageCenterInit();
+    outer = BspRuntimeEnterCritical();
+    assert(outer == original && __get_PRIMASK() == 1);
+    inner = BspRuntimeEnterCritical();
+    assert(inner == 1 && __get_PRIMASK() == 1);
+    MessageCenterInit();
+    assert(__get_PRIMASK() == 1);
+    BspRuntimeExitCritical(inner);
+    assert(__get_PRIMASK() == 1);
+    BspRuntimeExitCritical(outer);
+    assert(__get_PRIMASK() == original);
+    assert(BspRuntimeTick() == test_tick);
+}
+
+static void test_output_mapping(void)
+{
+    unsigned i;
+    static const uint16_t zeros[4] = SWERVE_ZERO_ENCODERS;
+    Chassis_Upload_Data_s feedback;
+    for (i = 0; i < 4; i++)
+    {
+        steering_motor[i].ecd = zeros[i] + (i + 1) * 64;
+        motor_chassis[i].speed_rpm = (i + 1) * 100;
+    }
+    ChassisInit();
+    RobotControlEnable();
+    remote_frame(RC_SW_DOWN, RC_SW_MID);
+    rc_ctrl.rc.ch[1] = 100;
+    expect_zero_output = 0;
+    test_sent = 0;
+    RobotTask();
+    assert(test_sent == 2);
+    assert(ChassisFeedbackRead(&feedback));
+    for (i = 0; i < 4; i++)
+    {
+        float expected = 5 * (chassis_move.swerve_wheels[i].command.speed_rpm - (i + 1) * 100);
+        assert(sent_drive[i] == (int16_t)expected);
+        close_to(feedback.wheel_rpm[i], (i + 1) * 100);
+        close_to(feedback.steering_angle_deg[i], -(float)(i + 1) * 64 * 360 / 8192);
+        assert(sent_steer[i] == (int16_t)(-360 * (float)(i + 1) * 64 * 360 / 8192));
+    }
+    remote_frame(RC_SW_DOWN, RC_SW_DOWN);
+    expect_zero_output = 1;
+    RobotTask();
+}
+
 static void test_robot_cycle(void)
 {
     unsigned i;
@@ -543,7 +729,8 @@ static void test_robot_cycle(void)
         steering_motor[i].ecd = zeros[i];
         motor_chassis[i].speed_rpm = 0;
     }
-    RobotControlInit();
+    ChassisInit(); /* A new boot, not a second enable operation. */
+    RobotControlEnable();
     for (i = 0; i < 4; i++)
     {
         close_to(chassis_move.steering_motor[i].steering_ecd_angle, 0);
@@ -598,7 +785,9 @@ int main(void)
     hcan2.Instance = CAN2;
     RobotInit();
     assert(init_stage == 5);
-    RobotControlInit();
+    assert(test_sent == 0); /* Registration must not send currents before scheduling. */
+    test_startup_gate();
+    test_runtime_critical();
     PID_init(&chassis_move.chassis_angle_pid, PID_POSITION, follow_pid,
              CHASSIS_FOLLOW_GIMBAL_PID_MAX_OUT, CHASSIS_FOLLOW_GIMBAL_PID_MAX_IOUT);
     update_control();
@@ -613,7 +802,9 @@ int main(void)
     test_timeout_and_zero_force();
     test_message_contract();
     test_kinematics_parity();
+    test_wheel_instance();
+    test_output_mapping();
     test_robot_cycle();
-    puts("PASS: switch modes, INS spin/rate/ramp, sensor safety, CAN, mailboxes, kinematics parity, robot cycle");
+    puts("PASS: switch modes, INS spin/rate/ramp, sensor safety, CAN, mailboxes, kinematics parity, wheel instances, startup gate, output mapping, robot cycle");
     return 0;
 }

@@ -6,10 +6,15 @@ wire protocol unchanged.
 
 ## Runtime flow
 
-`RobotInit` performs the existing board startup sequence. `OSTaskInit` creates the
-existing INS, calibration, UI and battery tasks plus one robot task scheduled at
-2 ms using `vTaskDelayUntil`. Priorities, stacks and the 357 ms startup delay are
-preserved. This is a nominal period, not a guarantee against CPU overruns.
+`RobotInit` performs the existing board startup sequence and initializes the
+chassis application and four wheel instances before the scheduler starts.
+`OSTaskInit` creates the existing INS, calibration, UI and battery tasks plus one
+robot task scheduled at 2 ms using `vTaskDelayUntil`. Priorities, stacks and the
+357 ms startup settling delay are preserved. This is a nominal period, not a
+guarantee against CPU overruns.
+After settling, `RobotControlEnable()` calls `ChassisEnable()` to refresh measured
+angles and enable the already registered wheels. Before this point the control
+loop's startup gate remains zero force, including any attempted spin command.
 The robot task executes this fixed order:
 
 1. `RobotCMDTask` snapshots the local DBUS receiver, validates its timeout and
@@ -18,8 +23,9 @@ The robot task executes this fixed order:
    adapter, consumes the command and checks INS and gimbal-CAN freshness.
 3. The chassis application handles mode transitions, spin rate control and frame
    transforms. The pure `SwerveSolve` module calculates wheel targets.
-4. The motor adapter runs the existing PID gains and sends the existing CAN frames.
-   The chassis application then publishes typed feedback.
+4. The wheel module runs the existing PID gains. The chassis-owned adapter
+   collects four outputs and sends the existing grouped CAN frames.
+5. The chassis application publishes typed feedback.
 
 `modules/message_center` deliberately uses static latest-value channels with bounded
 age checks. It does not use the reference repository's dynamic queue implementation,
@@ -48,12 +54,15 @@ which has no timestamp contract and an unsafe post-increment queue index.
 | `application/cmd/robot_cmd.c` | Local remote snapshot, mode request and stick scaling |
 | `application/chassis/chassis.c` | Safety gates, spin/follow state, wheel targets |
 | `modules/swerve/swerve_kinematics.c` | Hardware-independent four-wheel kinematics |
-| `modules/swerve/swerve_module.c` | Atomic motor feedback snapshot, PID, CAN output |
+| `modules/swerve/swerve_module.c` | Hardware-independent feedback conversion and PID |
+| `bsp/boards/bsp_runtime.c` | HAL-backed tick and critical-section wrappers |
 | `modules/message_center` | Static typed latest-value channels, 20 ms expiry |
 
 Keep `chassis_move` in Keil Watch for modes, sensor flags, spin references, wheel
 targets and currents. Raw remote diagnostics now live at `robot_cmd_rc`; the
 legacy `chassis_move.rc_snapshot` is no longer the active command source.
+The authoritative wheel PID state now lives in `chassis_move.swerve_wheels[i]`;
+the old PID fields are read-only diagnostic mirrors, not duplicate controllers.
 The feedback contract reports wheel RPM and steering degrees, not estimated body
 velocity. Old DJI `chassis_behaviour` and power-control files remain inactive;
 `chassis_task.c/h` are compatibility wrappers, not a second control loop.
@@ -68,6 +77,10 @@ Motor feedback timeout detection, CAN transmit retry/watchdog, a gimbal follow
 remote entry, referee power limiting and odometry are not newly implemented.
 Internal message expiry protects against a missing publisher only while the
 consumer is still running; it is not a watchdog for a stalled robot task.
+This is an incremental migration, not a claim that every legacy file now follows
+the new layering. The existing RC, INS, CAN receive, calibration and UI drivers
+still retain legacy HAL dependencies. The new wheel module and message runtime
+boundary are separated without rewriting those commissioned drivers.
 
 ## Verification
 
@@ -85,7 +98,11 @@ remain required before merging.
 The ARM tests exercise the real modules with simulated HAL I/O: all nine switch
 combinations, stick signs, RC/INS/CAN expiry, spin ramp/entry/wrap, zero force on all
 eight CAN outputs, typed-channel expiry across tick wrap, invalid numeric commands,
-legacy-formula kinematics parity and the complete `RobotTask` cycle.
+legacy-formula kinematics parity and the complete `RobotTask` cycle. Additional
+tests cover independent callback-based wheel instances, encoder wrap, signed RPM,
+bad configuration/feedback, startup output gating, distinct four-wheel feedback
+and output mapping, and nested critical sections. A static check rejects direct
+HAL/application includes in the new modules and checks Keil source registration.
 
 First hardware check: raise the wheels, start with right switch down, confirm zero
 currents, verify manual wheel order/signs at low stick input, then verify spin and

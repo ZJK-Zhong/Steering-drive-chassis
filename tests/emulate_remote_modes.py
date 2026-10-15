@@ -29,7 +29,7 @@ def words(address, count):
 
 def write_console(data):
     output.extend(data)
-    sys.stdout.write(data.decode("ascii", errors="replace"))
+    sys.stdout.write(data.decode("ascii", errors="backslashreplace"))
 
 
 def semihosting(cpu, interrupt, user_data):

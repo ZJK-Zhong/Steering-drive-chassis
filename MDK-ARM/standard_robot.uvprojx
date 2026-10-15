@@ -808,6 +808,11 @@
               <FilePath>..\bsp\boards\bsp_usart.c</FilePath>
             </File>
             <File>
+              <FileName>bsp_runtime.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\bsp\boards\bsp_runtime.c</FilePath>
+            </File>
+            <File>
               <FileName>bsp_servo_pwm.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\bsp\boards\bsp_servo_pwm.c</FilePath>

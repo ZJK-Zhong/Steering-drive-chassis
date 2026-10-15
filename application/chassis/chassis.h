@@ -8,6 +8,7 @@
 #include "remote_control.h"
 #include "pid.h"
 #include "user_lib.h"
+#include "swerve_module.h"
 
 typedef struct
 {
@@ -36,19 +37,26 @@ typedef struct
     RC_ctrl_t rc_snapshot;      /* Legacy callers may use as snapshot storage. */
     robot_mode_e robot_mode;
     chassis_mode_e mode;
-    uint8_t rc_online, gimbal_online, ins_online;
+    uint8_t rc_online, gimbal_online, ins_online, control_enabled;
     float ins_yaw, ins_wz_dps;
     float spin_reference_yaw, spin_relative_yaw, spin_rate_set_dps;
     pid_type_def spin_rate_pid, chassis_angle_pid;
     chassis_motor_t motor_chassis[4];
-    pid_type_def motor_speed_pid[4];
+    pid_type_def motor_speed_pid[4]; /* Read-only legacy diagnostic mirrors. */
     steering_motor_t steering_motor[4];
+    SwerveWheelInstance_s swerve_wheels[4]; /* Sole owner of wheel PID state. */
     float vx, vy, wz, vx_set, vy_set, wz_set;
     float chassis_relative_angle, chassis_relative_angle_set, chassis_yaw_set;
 } chassis_move_t;
 
 extern chassis_move_t chassis_move;
-void ChassisInit(void); /* Once, after the original startup settling delay. */
+void ChassisInit(void); /* Once, before the RTOS scheduler starts. */
+void ChassisEnable(void); /* Sample feedback and enable after startup settling. */
 void ChassisTask(void); /* One nonblocking control cycle. Sole motor-output owner. */
+/* Application adapter names retained for diagnostics and compatibility. */
+void WheelInit(chassis_move_t *state);
+void WheelFeedback(chassis_move_t *state);
+void WheelControl(chassis_move_t *state);
+void WheelSend(chassis_move_t *state);
 
 #endif

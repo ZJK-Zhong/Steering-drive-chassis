@@ -35,7 +35,7 @@ void StartRobotTask(void const *argument)
     TickType_t wake;
     (void)argument;
     vTaskDelay(pdMS_TO_TICKS(CHASSIS_TASK_INIT_TIME));
-    RobotControlInit();
+    RobotControlEnable();
     wake = xTaskGetTickCount();
     for (;;)
     {
