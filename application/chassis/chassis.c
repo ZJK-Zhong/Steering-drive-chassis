@@ -1,4 +1,4 @@
-/* Steering-drive chassis application, derived from DJI's chassis_task.c. */
+/* (C) COPYRIGHT 2019 DJI. Derived from chassis_task.c; application split in 2026. */
 #include "chassis.h"
 #include "message_center.h"
 #include "swerve_module.h"

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 <Project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="project_projx.xsd">
 
   <SchemaVersion>2.1</SchemaVersion>
@@ -1003,25 +1003,81 @@
           <GroupName>::CMSIS</GroupName>
         </Group>
 
-        <Group><GroupName>application/core</GroupName><Files><File><FileName>robot.c</FileName><FileType>1</FileType><FilePath>..\application\robot.c</FilePath></File><File><FileName>robot_task.c</FileName><FileType>1</FileType><FilePath>..\application\robot_task.c</FilePath></File></Files></Group>
-        <Group><GroupName>application/cmd</GroupName><Files><File><FileName>robot_cmd.c</FileName><FileType>1</FileType><FilePath>..\application\cmd\robot_cmd.c</FilePath></File></Files></Group>
-        <Group><GroupName>application/chassis</GroupName><Files><File><FileName>chassis.c</FileName><FileType>1</FileType><FilePath>..\application\chassis\chassis.c</FilePath></File></Files></Group>
-        <Group><GroupName>modules/message_center</GroupName><Files><File><FileName>message_center.c</FileName><FileType>1</FileType><FilePath>..\modules\message_center\message_center.c</FilePath></File></Files></Group>
-        <Group><GroupName>modules/swerve</GroupName><Files><File><FileName>swerve_kinematics.c</FileName><FileType>1</FileType><FilePath>..\modules\swerve\swerve_kinematics.c</FilePath></File><File><FileName>swerve_module.c</FileName><FileType>1</FileType><FilePath>..\modules\swerve\swerve_module.c</FilePath></File></Files></Group></Groups>
+        <Group>
+          <GroupName>application/core</GroupName>
+          <Files>
+            <File>
+              <FileName>robot.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\robot.c</FilePath>
+            </File>
+            <File>
+              <FileName>robot_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\robot_task.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>application/cmd</GroupName>
+          <Files>
+            <File>
+              <FileName>robot_cmd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\cmd\robot_cmd.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>application/chassis</GroupName>
+          <Files>
+            <File>
+              <FileName>chassis.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\application\chassis\chassis.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>modules/message_center</GroupName>
+          <Files>
+            <File>
+              <FileName>message_center.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\modules\message_center\message_center.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>modules/swerve</GroupName>
+          <Files>
+            <File>
+              <FileName>swerve_kinematics.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\modules\swerve\swerve_kinematics.c</FilePath>
+            </File>
+            <File>
+              <FileName>swerve_module.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\modules\swerve\swerve_module.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+      </Groups>
     </Target>
   </Targets>
 
   <RTE>
-    <apis />
+    <apis/>
     <components>
       <component Cclass="CMSIS" Cgroup="CORE" Cvendor="ARM" Cversion="4.3.0" condition="CMSIS Core">
-        <package name="CMSIS" schemaVersion="1.3" url="http://www.keil.com/pack/" vendor="ARM" version="4.5.0" />
+        <package name="CMSIS" schemaVersion="1.3" url="http://www.keil.com/pack/" vendor="ARM" version="4.5.0"/>
         <targetInfos>
-          <targetInfo name="standard_robot" />
+          <targetInfo name="standard_robot"/>
         </targetInfos>
       </component>
     </components>
-    <files />
+    <files/>
   </RTE>
 
 </Project>

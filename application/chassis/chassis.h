@@ -1,3 +1,4 @@
+/* (C) COPYRIGHT 2019 DJI. Control-state definitions adapted from chassis_task.h. */
 #ifndef CHASSIS_H
 #define CHASSIS_H
 

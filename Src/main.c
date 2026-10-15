@@ -83,7 +83,7 @@ void MX_FREERTOS_Init(void);
 //    va_start(ap, fmt);
 
 //    //return length of string 
-//    //è¿”å›žå­—ç¬¦ä¸²é•¿åº¦
+//    //·µ»Ø×Ö·û´®³¤¶È
 //    len = vsprintf((char *)tx_buf, fmt, ap);
 
 //    va_end(ap);

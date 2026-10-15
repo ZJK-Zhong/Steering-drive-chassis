@@ -29,8 +29,7 @@ static uint8_t test_data[8];
 static HAL_StatusTypeDef test_rx_status = HAL_OK;
 static unsigned test_sent;
 static uint8_t expect_zero_output = 1;
-
-static int16_t test_abs(int16_t value) { return value < 0 ? (int16_t)-value : value; }
+static int16_t sent_drive[4], sent_steer[4];
 
 uint32_t HAL_GetTick(void) { return test_tick; }
 #include "ins_motion_snapshot.inc"
@@ -52,8 +51,16 @@ HAL_StatusTypeDef HAL_CAN_AddTxMessage(CAN_HandleTypeDef *can, CAN_TxHeaderTypeD
     {
         int16_t current = (int16_t)((uint16_t)data[2*i] << 8 | data[2*i+1]);
         if (expect_zero_output) assert(current == 0);
-        if (can == &hcan1) assert(test_abs(current) <= 16000);
-        else assert(test_abs(current) <= 30000);
+        if (can == &hcan1)
+        {
+            assert(current >= -16000 && current <= 16000);
+            sent_drive[i] = current;
+        }
+        else
+        {
+            assert(current >= -30000 && current <= 30000);
+            sent_steer[i] = current;
+        }
     }
     test_sent++;
     *mailbox = 0;
@@ -418,12 +425,180 @@ static void test_timeout_and_zero_force(void)
     assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE);
 }
 
+static void test_message_contract(void)
+{
+    Chassis_Ctrl_Cmd_s command = {ROBOT_RC_DEBUG, 1, 0.5f, -0.2f, 60};
+    Chassis_Ctrl_Cmd_s snapshot;
+    Chassis_Upload_Data_s feedback;
+    union { uint32_t bits; float value; } invalid;
+    unsigned i;
+    MessageCenterInit();
+    assert(!ChassisCommandRead(NULL));
+    assert(!ChassisFeedbackRead(NULL));
+    assert(!ChassisCommandRead(&snapshot));
+    assert(snapshot.robot_mode == ROBOT_SAFE && !snapshot.rc_online);
+    assert(!ChassisFeedbackRead(&feedback));
+    ChassisCommandPublish(NULL);
+    ChassisFeedbackPublish(NULL);
+    assert(!ChassisCommandRead(&snapshot));
+    test_tick = 0xfffffff0u;
+    ChassisCommandPublish(&command);
+    command.vx = 0; /* Publication owns a copy, not the caller's pointer. */
+    test_tick = 3;
+    assert(ChassisCommandRead(&snapshot));
+    close_to(snapshot.vx, 0.5f);
+    test_tick = 4; /* Exactly 20 ms, including wraparound. */
+    assert(!ChassisCommandRead(&snapshot));
+    close_to(snapshot.vx, 0);
+    assert(snapshot.robot_mode == ROBOT_SAFE);
+    ChassisTask();
+    assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE);
+    assert(ChassisFeedbackRead(&feedback));
+    test_tick += CHASSIS_FEEDBACK_TIMEOUT_MS;
+    assert(!ChassisFeedbackRead(&feedback));
+
+    invalid.bits = 0x7fc00000u;
+    for (i = 0; i < 7; i++)
+    {
+        command.robot_mode = ROBOT_RC_DEBUG;
+        command.rc_online = 1;
+        command.vx = command.vy = command.wz = 0;
+        switch (i)
+        {
+            case 0: command.vx = invalid.value; break;
+            case 1: command.vy = invalid.value; break;
+            case 2: command.wz = invalid.value; break;
+            case 3: command.vx = NORMAL_MAX_CHASSIS_SPEED_X + 1; break;
+            case 4: command.vy = -NORMAL_MAX_CHASSIS_SPEED_Y - 1; break;
+            case 5: command.wz = CHASSIS_SPIN_MAX_COMMAND_DPS + 1; break;
+            default: command.robot_mode = ROBOT_FIRE; break;
+        }
+        ChassisCommandPublish(&command);
+        ChassisTask();
+        assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE);
+    }
+    invalid.bits = 0x7f800000u;
+    command.robot_mode = ROBOT_RC_DEBUG;
+    command.wz = invalid.value;
+    ChassisCommandPublish(&command);
+    ChassisTask();
+    assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE);
+}
+
+static void test_kinematics_parity(void)
+{
+    static const float velocities[][3] = {
+        {1, 0, 0}, {0, 1, 0}, {-1, 0, 0}, {0, -1, 0},
+        {0, 0, 120}, {0, 0, -120}, {0.6f, -0.4f, 80}, {-2, 1.5f, -132}
+    };
+    static const float angles[][4] = {
+        {0, 0, 0, 0}, {89, -89, 179, -179}, {720, -720, 1080, -1080}
+    };
+    unsigned v, a, i;
+    for (v = 0; v < sizeof(velocities)/sizeof(velocities[0]); v++)
+    for (a = 0; a < sizeof(angles)/sizeof(angles[0]); a++)
+    {
+        SwerveTarget target[4];
+        float theta = atan(1.0/1.0);
+        float vw = velocities[v][2] * 3.14f / 180 * CHASSIS_CENTER_TO_WHEEL;
+        float xs[4] = {-1, 1, 1, -1}, ys[4] = {1, 1, -1, -1};
+        SwerveSolve(velocities[v][0], velocities[v][1], velocities[v][2], angles[a], target);
+        for (i = 0; i < 4; i++)
+        {
+            float x = velocities[v][0] + xs[i] * vw * arm_sin_f32(theta);
+            float y = velocities[v][1] + ys[i] * vw * arm_cos_f32(theta);
+            float actual = angles[a][i] * PI / 180;
+            float diff = atan2(y, x) - actual;
+            float rpm = sqrt(pow(y, 2) + pow(x, 2)) * 60 / (CHASSIS_MOTOT_PER * 0.0526f);
+            uint8_t reversed = 0;
+            while (diff > PI) diff -= 2 * PI;
+            while (diff < -PI) diff += 2 * PI;
+            if (diff > PI/2) { diff -= PI; reversed = 1; }
+            else if (diff < -PI/2) { diff += PI; reversed = 1; }
+            assert(fabsf(target[i].angle_deg - (actual + diff) * 180 / PI) < 0.002f);
+            assert(fabsf(target[i].speed_rpm - (reversed ? -rpm : rpm)) < 0.005f);
+            assert(target[i].reversed == reversed);
+            assert(fabsf(target[i].angle_deg - angles[a][i]) <= 90.001f);
+        }
+    }
+    {
+        SwerveTarget target[4];
+        for (i = 0; i < 4; i++) { target[i].angle_deg = 37 + i; target[i].speed_rpm = 100; }
+        SwerveSolve(0, 0, 0, angles[0], target);
+        for (i = 0; i < 4; i++)
+        {
+            close_to(target[i].angle_deg, 37 + i);
+            close_to(target[i].speed_rpm, 0);
+        }
+    }
+}
+
+static void test_robot_cycle(void)
+{
+    unsigned i;
+    static const uint16_t zeros[4] = SWERVE_ZERO_ENCODERS;
+    Chassis_Upload_Data_s feedback;
+    for (i = 0; i < 4; i++)
+    {
+        steering_motor[i].ecd = zeros[i];
+        motor_chassis[i].speed_rpm = 0;
+    }
+    RobotControlInit();
+    for (i = 0; i < 4; i++)
+    {
+        close_to(chassis_move.steering_motor[i].steering_ecd_angle, 0);
+        assert(chassis_move.steering_motor[i].steering_zero_ecd == zeros[i]);
+    }
+    MessageCenterInit();
+    rc_frame_received = ins_motion_received = gimbal_frame_received = 0;
+    test_sent = 0;
+    RobotTask();
+    assert(test_sent == 2 && chassis_move.mode == CHASSIS_MODE_ZERO_FORCE);
+    remote_frame(RC_SW_DOWN, RC_SW_MID);
+    rc_ctrl.rc.ch[1] = 100;
+    expect_zero_output = 0;
+    RobotTask();
+    assert(chassis_move.mode == CHASSIS_RC_DEBUG && !chassis_move.ins_online);
+    assert(ChassisFeedbackRead(&feedback));
+    close_to(feedback.vx_set, 0.6f);
+    for (i = 0; i < 4; i++)
+    {
+        assert(sent_drive[i] > 0 && sent_steer[i] == 0);
+        close_to(feedback.wheel_rpm[i], 0);
+        close_to(feedback.steering_angle_deg[i], 0);
+    }
+    remote_frame(RC_SW_UP, RC_SW_DOWN);
+    expect_zero_output = 1;
+    RobotTask();
+    assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE);
+    remote_frame(RC_SW_MID, RC_SW_UP);
+    RobotTask();
+    assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE); /* Spin requires INS. */
+    ins_motion_publish(0.5f, 0);
+    expect_zero_output = 0;
+    RobotTask();
+    assert(chassis_move.mode == CHASSIS_SPIN);
+    close_to(chassis_move.spin_reference_yaw, 0.5f);
+    test_tick += INS_MOTION_TIMEOUT_MS;
+    remote_frame(RC_SW_MID, RC_SW_UP);
+    expect_zero_output = 1;
+    RobotTask();
+    assert(chassis_move.mode == CHASSIS_MODE_ZERO_FORCE);
+    test_tick += RC_CONTROL_TIMEOUT_MS;
+    RobotTask();
+    assert(chassis_move.robot_mode == ROBOT_SAFE);
+    test_sent = 0;
+}
+
 int main(void)
 {
     static const float follow_pid[3] = {CHASSIS_FOLLOW_GIMBAL_PID_KP,
         CHASSIS_FOLLOW_GIMBAL_PID_KI, CHASSIS_FOLLOW_GIMBAL_PID_KD};
     hcan1.Instance = CAN1;
     hcan2.Instance = CAN2;
+    RobotInit();
+    assert(init_stage == 5);
+    RobotControlInit();
     PID_init(&chassis_move.chassis_angle_pid, PID_POSITION, follow_pid,
              CHASSIS_FOLLOW_GIMBAL_PID_MAX_OUT, CHASSIS_FOLLOW_GIMBAL_PID_MAX_IOUT);
     update_control();
@@ -436,6 +611,9 @@ int main(void)
     test_ins_spin();
     test_can_validation();
     test_timeout_and_zero_force();
-    puts("PASS: switch modes, INS spin/rate feedback/ramp, yaw wrap, sensor safety, CAN validation, zero output");
+    test_message_contract();
+    test_kinematics_parity();
+    test_robot_cycle();
+    puts("PASS: switch modes, INS spin/rate/ramp, sensor safety, CAN, mailboxes, kinematics parity, robot cycle");
     return 0;
 }
