@@ -1,49 +1,65 @@
-# Keil MDK build outputs
-MDK-ARM/standard_tpye_c/
-MDK-ARM/Objects/
-MDK-ARM/Listings/
-
-*.o
+build/
+build-cmake/
+build-wall/
+# Prerequisites
 *.d
-*.crf
-*.axf
-*.hex
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
 *.map
-*.lnp
-*.dep
-*.iex
-*.lst
-*.htm
-*.build_log.htm
+*.exp
 
-# Keil user/session files
-*.uvopt
-*.uvoptx
-*.uvgui.*
-*.uvguix.*
-*.uvgui
-*.uvguix
+# Precompiled Headers
+*.gch
+*.pch
 
-# Debug probe and generated debug files
-MDK-ARM/DebugConfig/
-MDK-ARM/EventRecorderStub.scvd
-MDK-ARM/JLink*.ini
-MDK-ARM/JLink*.txt
-*.dbgconf
-*.scvd
+# Libraries
+*.lib
+*.a
+!/Middlewares/ST/ARM/DSP/Lib/*.a
+*.la
+*.lo
 
-# Editor and OS noise
-.vscode/
-.idea/
-*.swp
-*.swo
-Thumbs.db
-Desktop.ini
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
 
-# Temporary and backup files
-*.bak
-*.Bak
-*.tmp
-*.log
-*.lock
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
 
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# debug information files
+*.dwo
+
+# Keep the same published documents as yz-0609/rm-sentry.
+/.Doc/*
+!/.Doc/VSCode+Ozone使用方法.md
+!/.Doc/任务间通信机制.md
+!/.Doc/架构介绍与开发指南.md
