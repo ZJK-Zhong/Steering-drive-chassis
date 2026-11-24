@@ -102,3 +102,11 @@ steer[0]->measure
 - 原功率模型只覆盖驱动电机，尚未包含舵向功耗和重新标定结果。
 
 构建与软件验证方式见 [README_STEERING.md](../../README_STEERING.md)。
+
+## 控制状态与观测边界
+
+`chassis_state`是底盘应用的私有运行状态，模式、小陀螺参考与轮组目标均从此读取。
+`swerve_debug`仅由任务结束时的`PublishChassisDebug`复制，用于Watch；写入快照不会改变控制。
+复制不承诺跨字段原子一致，实时调试应以观测为主。
+
+八电机完整反馈可在Watch展开`chassis_move`，字段和单位见[统一电机调试入口](chassis_debug.md)。

@@ -37,11 +37,117 @@ static attitude_t imu;                             // 本轮INS快照，必须�
 static PIDInstance spin_pid;                       // 小陀螺角速度误差的比例修正，输入和输出均为rad/s
 static uint32_t last_task_tick;                     // 上轮底盘任务时间，用于转速爬升和任务超时检查
 
-/* 调试量不作为通信报文发送；轮速目标、舵角目标和实际反馈可在Watch中对照查看。 */
+/* 运行状态只在底盘应用内部使用；调试快照不作为控制输入。 */
+typedef struct
+{
+    chassis_mode_e mode;                 // 当前实际执行模式，保护停机时为无力。
+    uint8_t command_online;              // 本轮是否收到 CMD 消息，不代表遥控器在线。
+    uint8_t motors_online;               // 八电机全部有有效且未过期的反馈时为 1。
+    uint8_t ins_online;                  // INS 快照新鲜且航向、角速度数值正常。
+    uint8_t drive_online[4];            // 四个 M3508 反馈状态。
+    uint8_t steering_online[4];         // 四个 GM6020 反馈状态。
+    float yaw_deg;                      // 底盘 INS 航向，度。
+    float gyro_z_radps;                 // Z 轴角速度，rad/s，俯视逆时针为正。
+    float relative_yaw_deg;             // 本轮速度坐标转换使用的相对角，度。
+    float spin_reference_yaw_deg;       // 进入小陀螺时捕获的底盘朝向，度。
+    float spin_rate_ref_radps;          // 经角加速度限制后的旋转参考，rad/s。
+    float vx_body_mmps;                 // 车体系 X 向前目标，mm/s。
+    float vy_body_mmps;                 // 车体系 Y 向右目标，mm/s。
+    float wz_radps;                     // 实际送入运动学的角速度目标，rad/s。
+    float wheel_target_rpm[4];          // 驱动转子目标，经整车限速和舵向误差补偿。
+    float wheel_actual_rpm[4];          // 驱动转子实际 rpm，尚未乘减速比。
+    float steering_target_deg[4];       // 舵向多圈目标，度。
+    float steering_actual_deg[4];       // 舵向实际多圈角，已处理机械零位和方向，度。
+} ChassisState_s;
+static ChassisState_s chassis_state;
 SwerveDebug_s swerve_debug;
+ChassisMoveDebug_s chassis_move; ///< 八电机调试副本，由底盘任务刷新，不参与控制。
+static const SwerveGeometry_s swerve_geometry = {
+    .center_to_wheel_m = CHASSIS_CENTER_TO_WHEEL,
+    .wheel_perimeter_m = CHASSIS_MOTOT_PER,
+    .drive_reduction = SWERVE_DRIVE_REDUCTION};
 static SwerveTarget target[4];                     // 运动学输出，零速时保留其中上一轮的舵向目标
 static float steer_feedback_deg[4];                // 校零且修正方向的多圈舵角，同时作为角度环反馈
 static const uint16_t zero_ecd[4] = SWERVE_ZERO_ENCODERS; // 四个轮子机械朝前时的编码器刻度
+
+/**
+ * @brief 采集八电机完整反馈副本，并汇总本轮目标与执行状态供Orbit整体展开。
+ * @note 在ChassisInit设备注册完成后及每轮任务结束时调用。
+ *       关中断只保护原测量结构与时间戳的复制，不保证八电机同时采样。
+ *       PID与电流输出由MotorTask更新，stop_flag只能表示应用当前的启停请求。
+ */
+static void PublishChassisMoveDebug(void)
+{
+    chassis_move.state = swerve_debug;
+    chassis_move.command = chassis_cmd_recv;
+    uint32_t interrupt_mask = __get_PRIMASK();
+    __disable_irq();
+    uint32_t sampled_at_ms = HAL_GetTick();
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        DJIMotorInstance *drive_motor = drive[i];
+        DJIMotorInstance *steering_motor = steer[i];
+        ChassisDriveMotorDebug_s *drive_snapshot = &chassis_move.drive_motors[i];
+        ChassisSteeringMotorDebug_s *steering_snapshot = &chassis_move.steering_motors[i];
+
+        drive_snapshot->measure = drive_motor->measure;
+        drive_snapshot->last_rx_ms = drive_motor->last_rx_ms;
+        drive_snapshot->feedback_seen = drive_motor->feedback_seen;
+        drive_snapshot->online = drive_motor->feedback_seen &&
+                                 (uint32_t)(sampled_at_ms - drive_motor->last_rx_ms) <= SWERVE_MOTOR_TIMEOUT_MS;
+        drive_snapshot->stop_flag = drive_motor->stop_flag;
+
+        steering_snapshot->measure = steering_motor->measure;
+        steering_snapshot->last_rx_ms = steering_motor->last_rx_ms;
+        steering_snapshot->feedback_seen = steering_motor->feedback_seen;
+        steering_snapshot->online = steering_motor->feedback_seen &&
+                                    (uint32_t)(sampled_at_ms - steering_motor->last_rx_ms) <= SWERVE_MOTOR_TIMEOUT_MS;
+        steering_snapshot->stop_flag = steering_motor->stop_flag;
+    }
+    __set_PRIMASK(interrupt_mask);
+
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        ChassisDriveMotorDebug_s *drive_snapshot = &chassis_move.drive_motors[i];
+        ChassisSteeringMotorDebug_s *steering_snapshot = &chassis_move.steering_motors[i];
+        drive_snapshot->actual_speed_rpm = drive_snapshot->measure.speed_aps / 6.0f;
+        drive_snapshot->target_speed_rpm = chassis_state.wheel_target_rpm[i];
+        drive_snapshot->can_bus = drive[i]->motor_can_instance->can_handle == &hcan1 ? 1u : 2u;
+        drive_snapshot->motor_id = drive[i]->motor_can_instance->tx_id;
+
+        steering_snapshot->actual_angle_deg =
+            -(steering_snapshot->measure.total_angle - zero_ecd[i] * (360.0f / 8192.0f));
+        steering_snapshot->target_angle_deg = chassis_state.steering_target_deg[i];
+        steering_snapshot->zero_encoder = zero_ecd[i];
+        steering_snapshot->can_bus = steer[i]->motor_can_instance->can_handle == &hcan1 ? 1u : 2u;
+        steering_snapshot->motor_id = steer[i]->motor_can_instance->tx_id;
+    }
+    chassis_move.updated_at_ms = sampled_at_ms;
+}
+
+/** @brief 将本轮私有运行状态复制到观测快照；控制路径不读取快照。 */
+static void PublishChassisDebug(void)
+{
+    swerve_debug.mode = chassis_state.mode;
+    swerve_debug.command_online = chassis_state.command_online;
+    swerve_debug.motors_online = chassis_state.motors_online;
+    swerve_debug.ins_online = chassis_state.ins_online;
+    memcpy(swerve_debug.drive_online, chassis_state.drive_online, sizeof(swerve_debug.drive_online));
+    memcpy(swerve_debug.steering_online, chassis_state.steering_online, sizeof(swerve_debug.steering_online));
+    swerve_debug.yaw_deg = chassis_state.yaw_deg;
+    swerve_debug.gyro_z_radps = chassis_state.gyro_z_radps;
+    swerve_debug.relative_yaw_deg = chassis_state.relative_yaw_deg;
+    swerve_debug.spin_reference_yaw_deg = chassis_state.spin_reference_yaw_deg;
+    swerve_debug.spin_rate_ref_radps = chassis_state.spin_rate_ref_radps;
+    swerve_debug.vx_body_mmps = chassis_state.vx_body_mmps;
+    swerve_debug.vy_body_mmps = chassis_state.vy_body_mmps;
+    swerve_debug.wz_radps = chassis_state.wz_radps;
+    memcpy(swerve_debug.wheel_target_rpm, chassis_state.wheel_target_rpm, sizeof(swerve_debug.wheel_target_rpm));
+    memcpy(swerve_debug.wheel_actual_rpm, chassis_state.wheel_actual_rpm, sizeof(swerve_debug.wheel_actual_rpm));
+    memcpy(swerve_debug.steering_target_deg, chassis_state.steering_target_deg, sizeof(swerve_debug.steering_target_deg));
+    memcpy(swerve_debug.steering_actual_deg, chassis_state.steering_actual_deg, sizeof(swerve_debug.steering_actual_deg));
+    PublishChassisMoveDebug();
+}
 
 /**
  * @brief 对数值进行关于零对称的限幅
@@ -88,8 +194,8 @@ static void spin_reset(void)
     PID_Init_Config_s cfg = {.Kp = SWERVE_SPIN_RATE_KP,
         .MaxOut = SWERVE_SPIN_CORRECTION_DPS * DEGREE_2_RAD};
     PIDInit(&spin_pid, &cfg);
-    swerve_debug.spin_rate_ref_radps = 0;
-    swerve_debug.spin_reference_yaw_deg = swerve_debug.yaw_deg;
+    chassis_state.spin_rate_ref_radps = 0;
+    chassis_state.spin_reference_yaw_deg = chassis_state.yaw_deg;
 }
 
 /**
@@ -107,11 +213,11 @@ static void stop_all(void)
         DJIMotorSetRef(steer[i], steer_feedback_deg[i]);
         target[i].speed_rpm = 0;
         target[i].angle_deg = steer_feedback_deg[i];
-        swerve_debug.wheel_target_rpm[i] = 0;
-        swerve_debug.steering_target_deg[i] = steer_feedback_deg[i];
+        chassis_state.wheel_target_rpm[i] = 0;
+        chassis_state.steering_target_deg[i] = steer_feedback_deg[i];
     }
-    swerve_debug.mode = CHASSIS_ZERO_FORCE;
-    swerve_debug.vx_body_mmps = swerve_debug.vy_body_mmps = swerve_debug.wz_radps = 0;
+    chassis_state.mode = CHASSIS_ZERO_FORCE;
+    chassis_state.vx_body_mmps = chassis_state.vy_body_mmps = chassis_state.wz_radps = 0;
     spin_reset();
 }
 
@@ -159,6 +265,7 @@ void ChassisInit(void)
     chassis_pub = PubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
     last_task_tick = HAL_GetTick();
     spin_reset();
+    PublishChassisDebug();
 }
 
 /**
@@ -173,29 +280,29 @@ static void update_feedback(void)
     const float a = CHASSIS_CENTER_TO_WHEEL * 0.7071067811865475f;
     // 轮心位置使用解算的X向前、Y向左坐标，a为中心到轮心在单轴上的投影。
     const float px[4] = {a, a, -a, -a}, py[4] = {a, -a, -a, a};
-    swerve_debug.motors_online = 1;
+    chassis_state.motors_online = 1;
     // 读取期间禁止CAN回调改写测量结构，完成后恢复进入临界区前的中断状态。
     uint32_t irq = __get_PRIMASK();
     __disable_irq();
     for (unsigned i = 0; i < 4; ++i)
     {
-        swerve_debug.drive_online[i] = motor_online(drive[i]);
-        swerve_debug.steering_online[i] = motor_online(steer[i]);
-        if (!swerve_debug.drive_online[i] || !swerve_debug.steering_online[i])
-            swerve_debug.motors_online = 0;
+        chassis_state.drive_online[i] = motor_online(drive[i]);
+        chassis_state.steering_online[i] = motor_online(steer[i]);
+        if (!chassis_state.drive_online[i] || !chassis_state.steering_online[i])
+            chassis_state.motors_online = 0;
         // GM6020 编码器减去机械零位并取反；保留多圈角，避免过零跳变。
         steer_feedback_deg[i] = -(steer[i]->measure.total_angle -
             zero_ecd[i] * (360.0f / 8192.0f));
-        swerve_debug.steering_actual_deg[i] = steer_feedback_deg[i];
+        chassis_state.steering_actual_deg[i] = steer_feedback_deg[i];
         // 原电机模块反馈是转子度/秒，除以 6 才是 rpm。
-        swerve_debug.wheel_actual_rpm[i] = drive[i]->measure.speed_aps / 6.0f;
+        chassis_state.wheel_actual_rpm[i] = drive[i]->measure.speed_aps / 6.0f;
     }
     __set_PRIMASK(irq);
     // 单轮速度投影：wheel_x = v*cos(舵角)，wheel_y = v*sin(舵角)。
     // 对称布局下，平移取四轮平均；旋转由sum(-y_i*wheel_x + x_i*wheel_y)/sum(r_i^2)得到。
     for (unsigned i = 0; i < 4; ++i)
     {
-        float speed = swerve_debug.wheel_actual_rpm[i] *
+        float speed = chassis_state.wheel_actual_rpm[i] *
             (CHASSIS_MOTOT_PER * SWERVE_DRIVE_REDUCTION) / 60.0f;
         float angle = steer_feedback_deg[i] * DEGREE_2_RAD;
         float wheel_x = speed * cosf(angle), wheel_y = speed * sinf(angle);
@@ -210,12 +317,12 @@ static void update_feedback(void)
     VisionSetChassisVel(chassis_feedback_data.real_vx,
         chassis_feedback_data.real_vy, chassis_feedback_data.real_wz);
     // 原 INS 发布完整快照；除新鲜度外还检查数值范围，拒绝 NaN 和异常姿态。
-    swerve_debug.ins_online = INS_GetSnapshot(&imu) && isfinite(imu.Yaw) && fabsf(imu.Yaw) <= 180.1f &&
+    chassis_state.ins_online = INS_GetSnapshot(&imu) && isfinite(imu.Yaw) && fabsf(imu.Yaw) <= 180.1f &&
         isfinite(imu.Gyro[2]) && fabsf(imu.Gyro[2]) <= 35.0f;
-    if (swerve_debug.ins_online)
+    if (chassis_state.ins_online)
     {
-        swerve_debug.yaw_deg = SWERVE_INS_YAW_SIGN * imu.Yaw;
-        swerve_debug.gyro_z_radps = SWERVE_INS_YAW_SIGN * imu.Gyro[2];
+        chassis_state.yaw_deg = SWERVE_INS_YAW_SIGN * imu.Yaw;
+        chassis_state.gyro_z_radps = SWERVE_INS_YAW_SIGN * imu.Gyro[2];
     }
 }
 
@@ -248,8 +355,8 @@ static void apply_targets(void)
     float ratio = 60.0f / (CHASSIS_MOTOT_PER * SWERVE_DRIVE_REDUCTION);
     float max_rpm = SWERVE_MAX_WHEEL_MPS * ratio, peak = max_rpm;
     // 应用层 mm/s、Y 向右、rad/s，解算层 m/s、Y 向左、度/秒。
-    SwerveSolve(swerve_debug.vx_body_mmps * 0.001f,
-        -swerve_debug.vy_body_mmps * 0.001f, swerve_debug.wz_radps * RAD_2_DEGREE,
+    SwerveSolve(&swerve_geometry, chassis_state.vx_body_mmps * 0.001f,
+        -chassis_state.vy_body_mmps * 0.001f, chassis_state.wz_radps * RAD_2_DEGREE,
         steer_feedback_deg, target);
     // 按最大轮速对四轮同比例缩放，保持平移与旋转的合成比例。
     for (unsigned i = 0; i < 4; ++i) peak = fmaxf(peak, fabsf(target[i].speed_rpm));
@@ -259,9 +366,9 @@ static void apply_targets(void)
         // 舵向未转到位时，只保留沿目标方向的牵引分量；误差达到90度则暂不给驱动速度。
         // 该补偿减小转向过程的横向拖拽，不是位置闭环，也不能消除INS航向漂移。
         float alignment = fmaxf(0, cosf(error));
-        swerve_debug.wheel_target_rpm[i] = target[i].speed_rpm * max_rpm / peak * alignment;
-        swerve_debug.steering_target_deg[i] = target[i].angle_deg;
-        DJIMotorSetRef(drive[i], swerve_debug.wheel_target_rpm[i]);
+        chassis_state.wheel_target_rpm[i] = target[i].speed_rpm * max_rpm / peak * alignment;
+        chassis_state.steering_target_deg[i] = target[i].angle_deg;
+        DJIMotorSetRef(drive[i], chassis_state.wheel_target_rpm[i]);
         DJIMotorSetRef(steer[i], target[i].angle_deg);
         DJIMotorEnable(steer[i]);
         DJIMotorEnable(drive[i]);
@@ -271,58 +378,58 @@ static void apply_targets(void)
 void ChassisTask(void)
 {
     uint32_t now = HAL_GetTick(), elapsed = (uint32_t)(now - last_task_tick);
-    chassis_mode_e previous = swerve_debug.mode;
+    chassis_mode_e previous = chassis_state.mode;
     last_task_tick = now;
     /* 1. 更新实际状态，随后读取本轮CMD消息；消息为空不能继续执行旧目标。 */
     update_feedback();
     // command_online 只代表本轮收到 CMD 消息；遥控失联时 CMD 仍会发布无力指令。
-    swerve_debug.command_online = SubGetMessage(chassis_sub, &chassis_cmd_recv);
+    chassis_state.command_online = SubGetMessage(chassis_sub, &chassis_cmd_recv);
     /* 2. 统一保护判定。任一轮失联即停止八电机，避免只靠剩余轮组牵引。
      * elapsed检查的是本任务两次执行间隔；小陀螺和导航坐标变换还依赖有效INS。 */
-    if (!swerve_debug.command_online || !command_valid() || !swerve_debug.motors_online ||
+    if (!chassis_state.command_online || !command_valid() || !chassis_state.motors_online ||
         elapsed > SWERVE_COMMAND_TIMEOUT_MS || chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE ||
         ((chassis_cmd_recv.chassis_mode == CHASSIS_ROTATE || chassis_cmd_recv.mode == 1) &&
-         !swerve_debug.ins_online))
+         !chassis_state.ins_online))
         stop_all();
     else
     {
         float angle = 0;
         float wz = chassis_cmd_recv.wz;
-        swerve_debug.mode = chassis_cmd_recv.chassis_mode;
+        chassis_state.mode = chassis_cmd_recv.chassis_mode;
         /* 3. 先确定旋转目标：小陀螺用转速参考加反馈修正，其余模式沿用底盘模式约定。 */
-        if (swerve_debug.mode == CHASSIS_ROTATE)
+        if (chassis_state.mode == CHASSIS_ROTATE)
         {
             // 只在模式入口重捕获朝向；切换左拨杆不影响参考方向。
             if (previous != CHASSIS_ROTATE) spin_reset();
             // 用实际任务间隔限制角加速度，再以陀螺仪角速度反馈补偿转速误差。
             float step = SWERVE_SPIN_ACCEL_DPS2 * DEGREE_2_RAD * elapsed * 0.001f;
-            swerve_debug.spin_rate_ref_radps += clamp(chassis_cmd_recv.chassis_spin_speed -
-                swerve_debug.spin_rate_ref_radps, step);
-            wz = swerve_debug.spin_rate_ref_radps + PIDCalculate(&spin_pid,
-                swerve_debug.gyro_z_radps, swerve_debug.spin_rate_ref_radps);
+            chassis_state.spin_rate_ref_radps += clamp(chassis_cmd_recv.chassis_spin_speed -
+                chassis_state.spin_rate_ref_radps, step);
+            wz = chassis_state.spin_rate_ref_radps + PIDCalculate(&spin_pid,
+                chassis_state.gyro_z_radps, chassis_state.spin_rate_ref_radps);
         }
         else
         {
             spin_reset();
-            if (swerve_debug.mode == CHASSIS_NO_FOLLOW) wz = 0;
-            if (swerve_debug.mode == CHASSIS_FOLLOW_GIMBAL_YAW)
+            if (chassis_state.mode == CHASSIS_NO_FOLLOW) wz = 0;
+            if (chassis_state.mode == CHASSIS_FOLLOW_GIMBAL_YAW)
                 wz = 0.15f * chassis_cmd_recv.offset_angle;
         }
         /* 4. 选择平移参考系，再把输入速度投影到车体系。
          * mode=0不旋转输入速度；1使用INS与外部参考角；2使用外部相对角；
          * mode=3使用进入小陀螺时捕获的航向，本地遥控只发布0和3。 */
         if (chassis_cmd_recv.mode == 1)
-            angle = swerve_debug.yaw_deg - chassis_cmd_recv.offset_angle;
+            angle = chassis_state.yaw_deg - chassis_cmd_recv.offset_angle;
         else if (chassis_cmd_recv.mode == 2)
             angle = chassis_cmd_recv.offset_angle;
-        else if (chassis_cmd_recv.mode == 3 && swerve_debug.mode == CHASSIS_ROTATE)
-            angle = swerve_debug.yaw_deg - swerve_debug.spin_reference_yaw_deg;
+        else if (chassis_cmd_recv.mode == 3 && chassis_state.mode == CHASSIS_ROTATE)
+            angle = chassis_state.yaw_deg - chassis_state.spin_reference_yaw_deg;
         // 先归一化相对航向，跨越 ±180 度时平移映射仍连续。
-        swerve_debug.relative_yaw_deg = wrap_deg(angle);
-        angle = swerve_debug.relative_yaw_deg * DEGREE_2_RAD;
-        swerve_debug.vx_body_mmps = chassis_cmd_recv.vx * cosf(angle) - chassis_cmd_recv.vy * sinf(angle);
-        swerve_debug.vy_body_mmps = chassis_cmd_recv.vx * sinf(angle) + chassis_cmd_recv.vy * cosf(angle);
-        swerve_debug.wz_radps = clamp(wz, SWERVE_MAX_WZ_RADPS);
+        chassis_state.relative_yaw_deg = wrap_deg(angle);
+        angle = chassis_state.relative_yaw_deg * DEGREE_2_RAD;
+        chassis_state.vx_body_mmps = chassis_cmd_recv.vx * cosf(angle) - chassis_cmd_recv.vy * sinf(angle);
+        chassis_state.vy_body_mmps = chassis_cmd_recv.vx * sinf(angle) + chassis_cmd_recv.vy * cosf(angle);
+        chassis_state.wz_radps = clamp(wz, SWERVE_MAX_WZ_RADPS);
         /* 5. 四舵轮解算、整车轮速限幅和舵向误差补偿，最后更新八电机目标。 */
         apply_targets();
     }
@@ -330,4 +437,5 @@ void ChassisTask(void)
     float limit = referee_data->GameRobotState.chassis_power_limit;
     SetPowerLimit(limit > 0 ? limit : SWERVE_FALLBACK_POWER_W);
     PubPushMessage(chassis_pub, &chassis_feedback_data);
+    PublishChassisDebug();
 }

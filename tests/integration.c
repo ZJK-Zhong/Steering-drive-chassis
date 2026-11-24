@@ -193,9 +193,9 @@ static void geometry_tests(void)
     float actual[4] = {0};
     SwerveTarget out[4] = {0};
     const float ratio = 60.0f / (0.38f * 0.0526f);
-    SwerveSolve(1, 0, 0, actual, out);
+    SwerveSolve(&swerve_geometry, 1, 0, 0, actual, out);
     for (unsigned i = 0; i < 4; ++i) { NEAR(out[i].speed_rpm, ratio, 0.01f); NEAR(out[i].angle_deg, 0, 0.001f); }
-    SwerveSolve(-1, 0, 0, actual, out);
+    SwerveSolve(&swerve_geometry, -1, 0, 0, actual, out);
     for (unsigned i = 0; i < 4; ++i) { NEAR(out[i].speed_rpm, -ratio, 0.01f); NEAR(out[i].angle_deg, 0, 0.001f); }
     /* Reconstruct vectors for translation + spin at varying multi-turn steering angles. */
     const float vx = 0.7f, vy = -0.3f, dps = 120;
@@ -204,7 +204,7 @@ static void geometry_tests(void)
     for (unsigned k = 0; k < 20; ++k)
     {
         for (unsigned i = 0; i < 4; ++i) actual[i] = (int)(k * 43 + i * 97) - 720;
-        SwerveSolve(vx, vy, dps, actual, out);
+        SwerveSolve(&swerve_geometry, vx, vy, dps, actual, out);
         for (unsigned i = 0; i < 4; ++i)
         {
             CHECK(fabsf(out[i].angle_deg - actual[i]) <= 90.001f);
@@ -213,17 +213,88 @@ static void geometry_tests(void)
         }
     }
     float held = out[0].angle_deg;
-    SwerveSolve(0, 0, 0, actual, out);
+    SwerveSolve(&swerve_geometry, 0, 0, 0, actual, out);
     NEAR(out[0].angle_deg, held, 0.001f);
     for (unsigned i = 0; i < 4; ++i) CHECK(out[i].speed_rpm == 0);
     host_call(4, "PASS: swerve vectors, reversal, multi-turn and zero hold\n");
 }
 
+/* Distinct physical frames must stay in the correct wheel/axis snapshot.
+ * Watch writes must never alias live measurement or control storage. */
+static void TestChassisMoveDebug(void)
+{
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        motor_frame(drive[i]->motor_can_instance, 100 + i, 120 + i * 10);
+        motor_frame(steer[i]->motor_can_instance, zero_ecd[i], -40 - i * 10);
+        drive[i]->measure.real_current = 1000 + i;
+        drive[i]->measure.temperature = 30 + i;
+        steer[i]->measure.real_current = -2000 - i;
+        steer[i]->measure.temperature = 40 + i;
+    }
+    update_feedback();
+    PublishChassisDebug();
+    CHECK(chassis_move.updated_at_ms == test_tick);
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        CHECK(memcmp(&chassis_move.drive_motors[i].measure, &drive[i]->measure,
+                     sizeof(DJI_Motor_Measure_s)) == 0);
+        CHECK(memcmp(&chassis_move.steering_motors[i].measure, &steer[i]->measure,
+                     sizeof(DJI_Motor_Measure_s)) == 0);
+        CHECK(chassis_move.drive_motors[i].online && chassis_move.steering_motors[i].online);
+        CHECK(chassis_move.drive_motors[i].motor_id == i + 1);
+        CHECK(chassis_move.steering_motors[i].motor_id == i + 1);
+        CHECK(chassis_move.drive_motors[i].can_bus == 1);
+        CHECK(chassis_move.steering_motors[i].can_bus == 2);
+        CHECK(chassis_move.steering_motors[i].zero_encoder == zero_ecd[i]);
+        NEAR(chassis_move.drive_motors[i].actual_speed_rpm, drive[i]->measure.speed_aps / 6, 0.001f);
+        NEAR(chassis_move.steering_motors[i].actual_angle_deg, chassis_state.steering_actual_deg[i], 0.001f);
+        NEAR(chassis_move.drive_motors[i].target_speed_rpm, chassis_state.wheel_target_rpm[i], 0.001f);
+        NEAR(chassis_move.steering_motors[i].target_angle_deg, chassis_state.steering_target_deg[i], 0.001f);
+    }
+    DJI_Motor_Measure_s drive_before = drive[0]->measure;
+    DJI_Motor_Measure_s steering_before = steer[0]->measure;
+    memset(&chassis_move, 0xff, sizeof(chassis_move));
+    CHECK(memcmp(&drive_before, &drive[0]->measure, sizeof(drive_before)) == 0);
+    CHECK(memcmp(&steering_before, &steer[0]->measure, sizeof(steering_before)) == 0);
+    ChassisTask();
+    CHECK(chassis_move.state.mode == CHASSIS_ZERO_FORCE);
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        CHECK(chassis_move.drive_motors[i].stop_flag == MOTOR_STOP);
+        CHECK(chassis_move.steering_motors[i].stop_flag == MOTOR_STOP);
+        CHECK(chassis_move.drive_motors[i].target_speed_rpm == 0);
+    }
+    test_tick += SWERVE_MOTOR_TIMEOUT_MS + 1;
+    ChassisTask();
+    CHECK(!chassis_move.state.motors_online);
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        CHECK(!chassis_move.drive_motors[i].online && !chassis_move.steering_motors[i].online);
+        CHECK(chassis_move.drive_motors[i].feedback_seen && chassis_move.steering_motors[i].feedback_seen);
+        CHECK(chassis_move.drive_motors[i].measure.temperature == 30 + i);
+    }
+    host_call(4, "PASS: grouped eight-motor debug feedback, wheel mapping, zero force, timeout and watch isolation\n");
+}
+
 void test_main(void)
 {
     geometry_tests();
+    /* Same algorithm with another wheel size: the application supplies the ratio. */
+    SwerveGeometry_s alternate = swerve_geometry;
+    alternate.wheel_perimeter_m *= 2;
+    float neutral[4] = {0};
+    SwerveTarget alternate_target[4] = {0};
+    SwerveSolve(&alternate, 1, 0, 0, neutral, alternate_target);
+    NEAR(alternate_target[0].speed_rpm, 30.0f / (CHASSIS_MOTOT_PER * SWERVE_DRIVE_REDUCTION), 0.01f);
     RobotCMDInit();
     ChassisInit();
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        CHECK(!chassis_move.drive_motors[i].feedback_seen && !chassis_move.drive_motors[i].online);
+        CHECK(!chassis_move.steering_motors[i].feedback_seen && !chassis_move.steering_motors[i].online);
+    }
+    memset(&swerve_debug, 0xff, sizeof(swerve_debug)); // Observe-only data must not drive the controller.
 #if SWERVE_COMMAND_SOURCE == SWERVE_COMMAND_SOURCE_LOCAL_RC
     CHECK(test_can_count == 8);
     for (unsigned i = 0; i < 4; ++i)
@@ -249,12 +320,29 @@ void test_main(void)
     step(0, 100, 0, RC_SW_MID, RC_SW_MID);
     NEAR(swerve_debug.vy_body_mmps, 200, 0.001f);
     for (unsigned i = 0; i < 4; ++i) CHECK(fabsf(swerve_debug.wheel_target_rpm[i]) < 0.1f);
+    /* 横向遥控时，舵向尚未到位应暂停驱动，但四个舵向控制槽必须有输出。
+     * 直接核对生产DJIMotorControl产生的CAN2/0x1FF帧，防止只更新调试目标却未输出。 */
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        float error = chassis_move.steering_motors[i].target_angle_deg -
+                      chassis_move.steering_motors[i].actual_angle_deg;
+        CHECK(fabsf(error) > 89.9f && fabsf(error) < 90.1f);
+        CHECK(chassis_move.steering_motors[i].stop_flag == MOTOR_ENALBED);
+        int16_t output = (int16_t)(((uint16_t)steer_frame[2 * i] << 8) |
+                                  steer_frame[2 * i + 1]);
+        float expected = -fmaxf(-SWERVE_STEERING_MAX_OUT,
+                               fminf(SWERVE_STEERING_MAX_OUT, SWERVE_STEERING_KP * error));
+        CHECK(output != 0);
+        NEAR((float)output, expected, 1.0f);
+    }
+    host_call(4, "PASS: local RC lateral command enables all steering motors and sends nonzero CAN2/0x1FF slots\n");
     step(5, -5, 5, RC_SW_MID, RC_SW_MID);
     CHECK(swerve_debug.vx_body_mmps == 0 && swerve_debug.vy_body_mmps == 0 && swerve_debug.wz_radps == 0);
     test_imu.Yaw = 170;
     step(100, 0, 0, RC_SW_UP, RC_SW_DOWN);
     CHECK(swerve_debug.mode == CHASSIS_ROTATE);
     NEAR(swerve_debug.spin_rate_ref_radps, 0.3f * DEGREE_2_RAD, 0.0001f);
+    memset(&swerve_debug, 0xff, sizeof(swerve_debug)); // A live watch write must not reset spin reference/ramp.
     test_imu.Yaw = -100; // +90 degrees across the yaw wrap.
     step(100, 0, 0, RC_SW_UP, RC_SW_MID);
     NEAR(swerve_debug.relative_yaw_deg, 90, 0.001f);
@@ -342,7 +430,14 @@ void test_main(void)
     test_chassis_comm.update_flag = 1;
     step(0, 0, 0, 0, 0);
     CHECK(swerve_debug.mode == CHASSIS_ROTATE);
+    float reference_before_watch_write = swerve_debug.spin_reference_yaw_deg;
+    memset(&swerve_debug, 0xff, sizeof(swerve_debug));
+    step(0, 0, 0, 0, 0);
+    NEAR(swerve_debug.spin_reference_yaw_deg, reference_before_watch_write, 0.001f);
+    NEAR(swerve_debug.spin_rate_ref_radps, 0.6f * DEGREE_2_RAD, 0.0001f);
+
     host_call(4, "PASS: gimbal CAN IDs, command validation, online timeout, feedback and swerve control\n");
 #endif
+    TestChassisMoveDebug();
     finish(0);
 }

@@ -7,7 +7,6 @@
  * 输出角度接在当前多圈舵角附近，避免编码器跨圈时目标突然跳转。
  */
 #include "swerve_kinematics.h"
-#include "swerve_config.h"
 #include <math.h>
 
 #define PI 3.14159265358979323846f
@@ -20,7 +19,7 @@ float SwerveNormalizeRad(float angle)
     return angle;
 }
 
-void SwerveSolve(float vx, float vy, float wz_dps, const float actual_deg[4],
+void SwerveSolve(const SwerveGeometry_s *geometry, float vx, float vy, float wz_dps, const float actual_deg[4],
                  SwerveTarget target[4])
 {
     unsigned i;
@@ -29,9 +28,9 @@ void SwerveSolve(float vx, float vy, float wz_dps, const float actual_deg[4],
      * 下方按左前、右前、右后、左后展开轮心坐标，wz先从度/秒换为rad/s。 */
     const float theta = atan(1.0 / 1.0);
     /* 这里保留原成品解算的 3.14 换算系数，避免改动已经调试过的运动参数。 */
-    const float vw = wz_dps * 3.14f / 180.0f * CHASSIS_CENTER_TO_WHEEL;
+    const float vw = wz_dps * 3.14f / 180.0f * geometry->center_to_wheel_m;
     // 轮缘线速度 m/s -> 输出轴转速 -> 电机转子 rpm。
-    const float ratio = 60.0f / (CHASSIS_MOTOT_PER * SWERVE_DRIVE_REDUCTION);
+    const float ratio = 60.0f / (geometry->wheel_perimeter_m * geometry->drive_reduction);
     const float x[4] = {vx - vw * sinf(theta), vx + vw * sinf(theta),
                         vx + vw * sinf(theta), vx - vw * sinf(theta)};
     const float y[4] = {vy + vw * cosf(theta), vy + vw * cosf(theta),

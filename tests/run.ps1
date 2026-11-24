@@ -19,6 +19,15 @@ try {
     $previousPath = $env:PYTHONPATH
     try {
         if ($RuntimePath) { $env:PYTHONPATH = $RuntimePath }
+        # Deliberately omit every application/BSP/RTOS include directory.
+        $geometryElf = 'build/tests/kinematics-standalone.elf'
+        & arm-none-eabi-gcc @flags -Imodules/swerve tests/kinematics_standalone.c `
+            tests/startup.s modules/swerve/swerve_kinematics.c `
+            -nostartfiles '-specs=nano.specs' '-specs=nosys.specs' `
+            '-Wl,--gc-sections' -T tests/test.ld -lm -lc -o $geometryElf
+        if ($LASTEXITCODE) { throw 'Standalone kinematics compilation failed' }
+        & $PythonExecutable tests/emulate.py $geometryElf
+        if ($LASTEXITCODE) { throw 'Standalone kinematics tests failed' }
         foreach ($sourceMode in 0, 1) {
             $elf = "build/tests/integration-$sourceMode.elf"
             & arm-none-eabi-gcc @flags "-DSWERVE_COMMAND_SOURCE=$sourceMode" @includes @sources `

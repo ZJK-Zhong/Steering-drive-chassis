@@ -188,3 +188,10 @@ swerve_debug.steering_actual_deg
 ```
 
 本版只完成软件构建与仿真验证，未连接硬件、未烧录。
+
+## 模块边界优化
+
+详见[架构说明](ARCHITECTURE.md)。Watch入口保持原名称，控制改用私有状态；
+解算接收显式几何参数。双板通信适配服务只在成对的双板工程中启用。
+
+八电机完整反馈可在Watch展开`chassis_move`，字段和单位见[统一电机调试入口](application/chassis/chassis_debug.md)。

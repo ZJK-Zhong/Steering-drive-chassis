@@ -10,3 +10,5 @@ CMD、消息中心、BSP、电机控制、INS、裁判系统、超级电容和 U
 上电或遥控失联恢复后，必须先拨右下解锁。
 
 配置、运行调用链、软件测试和烧录前检查见 [README_STEERING.md](README_STEERING.md)。
+
+模块职责、控制/调试隔离及本轮回归范围见[架构说明](ARCHITECTURE.md)。
